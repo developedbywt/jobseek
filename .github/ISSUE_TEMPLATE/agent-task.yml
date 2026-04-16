@@ -1,0 +1,20 @@
+name: Agent task
+description: Request GitHub-hybrid planning/build/review automation for a personal engineering task
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What should the agent accomplish?
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints
+      description: Non-goals, boundaries, or required approaches
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification
+      description: Exact commands or checks the build stage should run

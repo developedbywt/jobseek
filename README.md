@@ -24,3 +24,15 @@ The agent environment needs:
 - `git`, `gh` (GitHub CLI, authenticated)
 - Python 3.12+
 - Web access (to research companies and fetch career pages)
+
+## GitHub Hybrid Agent Automation
+
+This repo also includes a personal-use GitHub-first automation loop for general engineering tasks.
+
+- Open an issue using the `Agent task` template
+- Add the `agent:plan` label to generate a plan
+- Review `ai/runs/<issue>/Spec.md` and `Plan.json`
+- Add the `agent:build` label to execute the approved plan
+- Review the PR on GitHub, then add the `agent:review` label to the PR for a bounded review pass
+
+See `docs/14-github-hybrid-agent-automation.md` for setup and operating details.
