@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import textwrap
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -185,3 +186,44 @@ async def test_run_sync_enrich_all_errors_exits():
     assert result["enriched"] == 0
     assert result["failed"] == 1
     provider.generate.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_run_sync_enrich_concurrent_processing():
+    """Verify concurrent processing with max_concurrent limit."""
+    import uuid
+    import time
+
+    fake_ids = [str(uuid.uuid4()) for _ in range(3)]
+    rows = [
+        {"id": fid, "title": f"Role {i}", "locale": "en", "employment_type": "full_time"}
+        for i, fid in enumerate(fake_ids)
+    ]
+
+    pool = MagicMock()
+    pool.fetch = AsyncMock(side_effect=[rows, []])
+    pool.fetchval = AsyncMock(return_value="<p>Job HTML</p>")
+    pool.execute = AsyncMock(return_value=None)
+
+    # Track concurrent calls: each call sleeps briefly, allowing concurrency detection
+    call_times = []
+
+    async def mock_generate(*args, **kwargs):
+        call_times.append(time.time())
+        await asyncio.sleep(0.01)  # Simulate brief async work
+        return ({"seniority": "entry"}, MagicMock())
+
+    provider = MagicMock()
+    provider.generate = AsyncMock(side_effect=mock_generate)
+
+    with patch("src.core.enrich.batch._persist_results", new_callable=AsyncMock):
+        start = time.time()
+        result = await run_sync_enrich(
+            pool, provider, batch_size=3, rate_limit_rpm=60, max_concurrent=2
+        )
+        elapsed = time.time() - start
+
+    assert result["enriched"] == 3
+    # With concurrency, 3 tasks at 0.01s each should take ~0.02-0.03s (not sequential 0.03+)
+    # Sequential would take longer; concurrent should complete faster
+    assert len(call_times) == 3

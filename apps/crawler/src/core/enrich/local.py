@@ -137,94 +137,141 @@ async def fetch_html_local(pool: asyncpg.Pool, posting_id: str, locale: str) -> 
 # ── sync enrichment loop ───────────────────────────────────────────────
 
 
+async def _process_enrichment_task(
+    pool: asyncpg.Pool,
+    provider,
+    row: dict,
+    semaphore: asyncio.Semaphore,
+    rate_limiter: dict,
+    system_prompt: str,
+    enrichment_schema: dict,
+) -> tuple[str, dict | None, object | None, str]:
+    """Process a single row enrichment with semaphore and rate-limit coordination.
+
+    Returns (posting_id, parsed_dict or None, usage or None, outcome).
+    Outcome: "success", "no_html", or "api_error".
+    """
+    from src.core.enrich.job import build_user_message
+
+    pid = str(row["id"])
+    locale = row["locale"] or "en"
+
+    async with semaphore:
+        html = await fetch_html_local(pool, pid, locale)
+        if not html:
+            log.warning("enrich.local.no_html", posting_id=pid, locale=locale)
+            await pool.execute(
+                "UPDATE job_posting SET to_be_enriched = true WHERE id = $1::uuid",
+                pid,
+            )
+            return (pid, None, None, "no_html")
+
+        # Rate-limit: acquire slot and sleep for rate limiting
+        async with rate_limiter["lock"]:
+            if rate_limiter["attempts"] > 0:
+                # Sleep to maintain rate limit
+                await asyncio.sleep(60 / rate_limiter["rpm"])
+            rate_limiter["attempts"] += 1
+
+        user_msg = build_user_message(
+            html,
+            title=row["title"],
+            locations=None,
+            employment_type=row["employment_type"],
+        )
+
+        try:
+            parsed_dict, usage = await provider.generate(
+                system_prompt=system_prompt,
+                user_content=user_msg,
+                response_schema=enrichment_schema,
+            )
+            log.info("enrich.local.gemini_call", posting_id=pid)
+            return (pid, parsed_dict, usage, "success")
+        except Exception as exc:
+            log.warning("enrich.local.gemini_error", posting_id=pid, error=str(exc))
+            await pool.execute(
+                "UPDATE job_posting SET to_be_enriched = true WHERE id = $1::uuid",
+                pid,
+            )
+            return (pid, None, None, "api_error")
+
+
 async def run_sync_enrich(
     pool: asyncpg.Pool,
     provider,
     *,
     batch_size: int = 20,
     rate_limit_rpm: int = 15,
+    max_concurrent: int = 5,
 ) -> dict:
-    """Claim pending postings, enrich via sync Gemini calls, persist results.
+    """Claim pending postings, enrich via parallel Gemini calls, persist results.
 
     provider — SyncProvider instance (GeminiSyncProvider).
     batch_size — postings per claim iteration (default 20).
     rate_limit_rpm — max Gemini calls per minute (default 15).
+    max_concurrent — max concurrent enrichment tasks (default 5).
 
     Returns {"enriched": N, "failed": M, "skipped": K}.
     """
     from src.config import settings
     from src.core.enrich.batch import _persist_results
-    from src.core.enrich.job import ENRICH_VERSION, SYSTEM_PROMPT, EnrichmentResult, build_user_message
+    from src.core.enrich.job import SYSTEM_PROMPT, EnrichmentResult
 
     total_enriched = total_failed = total_skipped = 0
+    semaphore = asyncio.Semaphore(max_concurrent)
+    system_prompt = SYSTEM_PROMPT
+    enrichment_schema = EnrichmentResult.model_json_schema()
 
     while True:
         rows = await pool.fetch(_CLAIM_PENDING_LOCAL, batch_size)
         if not rows:
             break
 
-        results: list[tuple[str, dict | None, object | None]] = []
-        posting_ids: list[str] = []
-        gemini_calls_made = 0   # successful enrichments this batch (loop-exit guard)
-        gemini_attempts = 0     # API calls attempted this batch (rate-limit sleep)
+        # Shared rate limiter across all concurrent tasks
+        rate_limiter = {
+            "attempts": 0,
+            "rpm": rate_limit_rpm,
+            "lock": asyncio.Lock(),
+        }
 
-        for row in rows:
-            pid = str(row["id"])
-            posting_ids.append(pid)
-            locale = row["locale"] or "en"
-
-            html = await fetch_html_local(pool, pid, locale)
-            if not html:
-                log.warning("enrich.local.no_html", posting_id=pid, locale=locale)
-                # Re-queue so it can be retried after description is populated
-                await pool.execute(
-                    "UPDATE job_posting SET to_be_enriched = true WHERE id = $1::uuid",
-                    pid,
-                )
-                results.append((pid, None, None))
-                total_skipped += 1
-                continue
-
-            # Rate-limit: sleep before every API call except the first attempt.
-            # Track attempts (not successes) so failed calls also contribute to spacing.
-            if gemini_attempts > 0:
-                await asyncio.sleep(60 / rate_limit_rpm)
-            gemini_attempts += 1
-
-            user_msg = build_user_message(
-                html,
-                title=row["title"],
-                locations=None,  # local mode has no denormalized text locations
-                employment_type=row["employment_type"],
+        # Run all enrichment tasks concurrently with gather
+        tasks = [
+            _process_enrichment_task(
+                pool,
+                provider,
+                row,
+                semaphore,
+                rate_limiter,
+                system_prompt,
+                enrichment_schema,
             )
+            for row in rows
+        ]
+        results_with_outcome = await asyncio.gather(*tasks, return_exceptions=False)
 
-            try:
-                parsed_dict, usage = await provider.generate(
-                    system_prompt=SYSTEM_PROMPT,
-                    user_content=user_msg,
-                    response_schema=EnrichmentResult.model_json_schema(),
-                )
-                log.info("enrich.local.gemini_call", posting_id=pid)
-                results.append((pid, parsed_dict, usage))
+        # Process results: separate by outcome and prepare for persistence
+        results = []  # For _persist_results
+        posting_ids = []
+        gemini_calls_made = 0
+
+        for pid, parsed_dict, usage, outcome in results_with_outcome:
+            posting_ids.append(pid)
+            results.append((pid, parsed_dict, usage))
+
+            if outcome == "success":
                 total_enriched += 1
                 gemini_calls_made += 1
-            except Exception as exc:
-                log.warning("enrich.local.gemini_error", posting_id=pid, error=str(exc))
-                # Re-queue for retry
-                await pool.execute(
-                    "UPDATE job_posting SET to_be_enriched = true WHERE id = $1::uuid",
-                    pid,
-                )
-                results.append((pid, None, None))
+            elif outcome == "no_html":
+                total_skipped += 1
+            elif outcome == "api_error":
                 total_failed += 1
 
-        # Break if no successful enrichments: all items lacked HTML (re-claim would
-        # spin forever) or all API calls failed (no progress to make continuing).
+        # Break if no successful enrichments
         if gemini_calls_made == 0:
             break
 
         # Insert synthetic enrich_batch row before calling _persist_results
-        # (_persist_results does UPDATE enrich_batch SET status='completed' at the end)
         batch_id = f"local_sync_{uuid4()}"
         await pool.execute(
             """
