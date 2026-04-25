@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { getQueueItems, removeFromQueue, analyzeQueueItem } from "@/lib/actions/queue";
 import type { QueueEntry } from "@/lib/actions/queue";
 import { QueueJobCard } from "@/components/queue/QueueJobCard";
+import { CustomizationHistoryPanel } from "@/components/resume/CustomizationHistoryPanel";
 import { Button } from "@/components/ui/Button";
 import Link from "next/link";
 
@@ -95,6 +96,11 @@ export default function QueuePage() {
           ))}
         </div>
       )}
+
+      {/* Customization History Panel */}
+      <div className="mt-8 pt-8 border-t border-border">
+        <CustomizationHistoryPanel />
+      </div>
     </div>
   );
 }
