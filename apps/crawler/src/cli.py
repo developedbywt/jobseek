@@ -94,7 +94,7 @@ def parse_args() -> argparse.Namespace:
 
     enrich_local_p = sub.add_parser(
         "enrich-local",
-        help="Enrich flagged postings via sync Gemini calls (local mode)",
+        help="Enrich flagged postings via concurrent Gemini calls (local mode)",
     )
     enrich_local_p.add_argument(
         "--batch-size",
@@ -107,6 +107,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="Gemini calls per minute (default: from ENRICH_RATE_LIMIT_RPM env, fallback 15)",
+    )
+    enrich_local_p.add_argument(
+        "--max-concurrent",
+        type=int,
+        default=5,
+        help="Max concurrent enrichment tasks (default: 5)",
     )
 
     alert_p = sub.add_parser(
@@ -304,6 +310,7 @@ async def run() -> None:
                 provider,
                 batch_size=args.batch_size,
                 rate_limit_rpm=rpm,
+                max_concurrent=args.max_concurrent,
             )
             print(
                 f"enrich-local: enriched={result['enriched']} "
