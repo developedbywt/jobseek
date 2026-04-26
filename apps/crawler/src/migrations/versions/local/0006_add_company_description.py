@@ -1,4 +1,16 @@
-"""Add company_description table (Supabase mirror for local/self-hosted deployments)."""
+"""Add company_description table (Supabase mirror for local/self-hosted deployments).
+
+Revision ID: 0006
+Down Revision: 0004
+Create Date: 2026-04-26
+"""
+
+from __future__ import annotations
+
+revision = "0006"
+down_revision = "0004"
+branch_labels = None
+depends_on = None
 
 from alembic import op
 
