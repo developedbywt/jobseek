@@ -2220,6 +2220,15 @@ async def run_sync(dry_run: bool = False) -> None:
 
     ts_client = get_typesense_client()
 
+    # Single-host mode: both DATABASE_URL and LOCAL_DATABASE_URL point to the
+    # same Postgres (e.g., Oracle free-tier deployment). In this case we reuse
+    # the same connection rather than acquiring a second one from local_pool —
+    # acquiring two connections to the same DB inside the same transaction
+    # causes lock contention and asyncpg command_timeout failures.
+    _same_db = bool(
+        settings.database_url and settings.database_url == settings.local_database_url
+    )
+
     supa_pool = await create_pool()
     local_pool = None
     if not dry_run:
@@ -2253,24 +2262,35 @@ async def run_sync(dry_run: bool = False) -> None:
             # 2. Apply CSV updates to local (new companies get local UUIDs)
             # 3. Mirror local -> Supabase (display layer)
             if local_pool is not None and not dry_run:
-                async with local_pool.acquire() as lc:
+                if _same_db:
+                    lc = supa_conn
                     await _mirror_companies_to_local(supa_conn, lc)
                     await sync_companies(lc, companies, dry_run)
                     await _mirror_companies_to_supabase(lc, supa_conn)
+                else:
+                    async with local_pool.acquire() as lc:
+                        await _mirror_companies_to_local(supa_conn, lc)
+                        await sync_companies(lc, companies, dry_run)
+                        await _mirror_companies_to_supabase(lc, supa_conn)
             else:
                 # No local pool (dry_run or unreachable) — write to Supabase directly
                 await sync_companies(supa_conn, companies, dry_run)
             await sync_company_descriptions(supa_conn, company_descs, dry_run)
 
             # Boards -> Supabase + local Postgres + Redis
-            local_conn = None
+            _boards_local_conn = None
+            _release_boards_conn = False
             if local_pool is not None:
-                local_conn = await local_pool.acquire()
+                if _same_db:
+                    _boards_local_conn = supa_conn
+                else:
+                    _boards_local_conn = await local_pool.acquire()
+                    _release_boards_conn = True
             try:
-                await sync_boards(supa_conn, boards, dry_run, local_conn=local_conn)
+                await sync_boards(supa_conn, boards, dry_run, local_conn=_boards_local_conn)
             finally:
-                if local_conn is not None:
-                    await local_pool.release(local_conn)
+                if _release_boards_conn and _boards_local_conn is not None:
+                    await local_pool.release(_boards_local_conn)
 
             if not dry_run:
                 await resolve_pending_misses(supa_conn)
@@ -2280,10 +2300,11 @@ async def run_sync(dry_run: bool = False) -> None:
             # Must run inside the Supabase transaction so we can read back
             # the IDs that Supabase assigned to occupation/seniority rows.
             if local_pool is not None and not dry_run:
-                async with local_pool.acquire() as local_conn:
+                _lc_lookup = supa_conn if _same_db else await local_pool.acquire()
+                try:
                     await sync_lookup_tables_local(
                         supa_conn,
-                        local_conn,
+                        _lc_lookup,
                         occupation_domains,
                         occupations,
                         seniority_df,
@@ -2291,6 +2312,9 @@ async def run_sync(dry_run: bool = False) -> None:
                         industries,
                         dry_run,
                     )
+                finally:
+                    if not _same_db:
+                        await local_pool.release(_lc_lookup)
 
         log.info(
             "sync.complete",
