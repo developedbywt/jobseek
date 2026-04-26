@@ -1,0 +1,116 @@
+# docker-compose.yml — Oracle Cloud A1 (ARM) personal deployment
+#
+# Self-contained: Postgres + Redis run as local containers.
+# Skips Supabase exporter, R2 drain, Typesense, Grafana Alloy.
+# Set env vars via .env file next to this compose file.
+#
+# Usage:
+#   docker compose up -d
+#   docker compose logs -f worker-1
+
+x-common-env: &common-env
+  LOCAL_DATABASE_URL: postgresql://crawler:${POSTGRES_PASSWORD}@localhost:5432/crawler
+  REDIS_URL: redis://localhost:6379/0
+  WORKER_ID_PREFIX: oracle
+  LOG_LEVEL: INFO
+  USE_LOCAL_DESCRIPTIONS: "true"
+  # Enrichment — Phase 1 alert pipeline
+  ENRICH_PROVIDER: ${ENRICH_PROVIDER:-gemini}
+  ENRICH_MODEL: ${ENRICH_MODEL:-gemini-2.0-flash}
+  ENRICH_API_KEY: ${ENRICH_API_KEY}
+  ENRICH_RATE_LIMIT_RPM: ${ENRICH_RATE_LIMIT_RPM:-15}
+
+services:
+  # -- Postgres (local source of truth) ----------------------------------
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      POSTGRES_USER: crawler
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: crawler
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crawler -d crawler"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    mem_limit: 512m
+
+  # -- Redis (worker queues) --------------------------------------------
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    network_mode: host
+    command: redis-server --maxmemory 256mb --maxmemory-policy noeviction --bind 127.0.0.1
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    mem_limit: 384m
+
+  # -- Migrate + seed Redis (runs once, exits) --------------------------
+  migrate:
+    image: crawler-slim:latest
+    network_mode: host
+    environment:
+      <<: *common-env
+    command: >
+      sh -c "
+        uv run --no-sync alembic -c src/migrations/alembic.ini upgrade head &&
+        uv run --no-sync crawler sync
+      "
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: "no"
+
+  # -- HTTP Workers (2x — fits Oracle A1 free tier RAM) ----------------
+  worker-1:
+    image: crawler-slim:latest
+    init: true
+    restart: unless-stopped
+    network_mode: host
+    stop_grace_period: 30s
+    command: uv run --no-sync crawler run
+    environment:
+      <<: *common-env
+      METRICS_PORT: "9095"
+      DISCOVERY_CONCURRENCY: "20"
+      MONITOR_CONCURRENCY: "8"
+      CRAWLER_DB_POOL_MAX: "15"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    mem_limit: 1g
+    cpus: 1.0
+
+  worker-2:
+    image: crawler-slim:latest
+    init: true
+    restart: unless-stopped
+    network_mode: host
+    stop_grace_period: 30s
+    command: uv run --no-sync crawler run
+    environment:
+      <<: *common-env
+      METRICS_PORT: "9096"
+      DISCOVERY_CONCURRENCY: "20"
+      MONITOR_CONCURRENCY: "8"
+      CRAWLER_DB_POOL_MAX: "15"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    mem_limit: 1g
+    cpus: 1.0
+
+volumes:
+  postgres-data:
+  redis-data:
