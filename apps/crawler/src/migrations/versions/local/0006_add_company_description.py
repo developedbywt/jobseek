@@ -8,7 +8,7 @@ Create Date: 2026-04-26
 from __future__ import annotations
 
 revision = "0006"
-down_revision = "0004"
+down_revision = "0005"
 branch_labels = None
 depends_on = None
 
