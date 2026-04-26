@@ -87,12 +87,16 @@ def create_sync_provider(provider: str, model: str, api_key: str) -> SyncProvide
     if not api_key:
         raise ValueError(
             "ENRICH_API_KEY is required for sync enrichment. "
-            "Set ENRICH_PROVIDER=gemini, ENRICH_MODEL=gemini-2.0-flash, and ENRICH_API_KEY=<your-key>."
+            "Set ENRICH_PROVIDER and ENRICH_API_KEY in your .env."
         )
 
     if provider == "gemini":
         from src.core.enrich.providers.gemini_sync import GeminiSyncProvider
 
         return GeminiSyncProvider(model=model, api_key=api_key)
+    elif provider == "minimax":
+        from src.core.enrich.providers.minimax_sync import MiniMaxSyncProvider
+
+        return MiniMaxSyncProvider(model=model, api_key=api_key)
     else:
-        raise ValueError(f"Unsupported sync provider: {provider!r}. Only 'gemini' supported.")
+        raise ValueError(f"Unsupported sync provider: {provider!r}. Supported: gemini, minimax.")
