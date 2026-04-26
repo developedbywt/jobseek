@@ -12,7 +12,7 @@ The project has no infrastructure for tracking general feature work. All existin
 Enable a local-brainstorm → GitHub Issues → automated-implementation pipeline for feature work, where:
 - Planning happens locally with Claude Code
 - Implementation happens in the cloud via GitHub Actions + Claude Code
-- The developer controls when each task starts (by applying a label)
+- The developer signals readiness by applying a label; a cron queue handles scheduling, budget, and recovery
 
 ## Pipeline Overview
 
@@ -28,12 +28,13 @@ GitHub Issues
     ├── Child #N+2: Task 2
     └── Child #N+3: Task 3
 
-GitHub Actions
-  Developer applies label "implement-me" to a child issue
-  → implement-feature.yml fires
-  → Claude Code (cloud) reads issue + parent spec
-  → Implements task, opens PR
+GitHub Actions (cron every 30 min)
+  implement-feature.yml wakes up
+  → check-feature-budget.sh: ≤3 tasks per 3-hour window, else exit
+  → select-feature-issue.sh: picks oldest implement-me issue, claims it
+  → Claude Code reads issue + parent spec, implements task, opens PR
   → On PR merge: task checked off in parent, issue labeled "done"
+  → Stale detection: if in-progress >2h with no PR → comment + reset to implement-me
 ```
 
 ## Issue Structure
@@ -70,14 +71,16 @@ GitHub Actions
 
 ### `implement-feature.yml`
 
-**Trigger:** `issues.labeled` where label = `implement-me` and issue has `feature-task`
+**Trigger:** `schedule` — every 30 minutes (`*/30 * * * *`)
 
 **Steps:**
-1. Add `in-progress`, remove `implement-me`
-2. Fetch issue body + parent issue spec
-3. Run Claude Code with structured prompt (task + full spec context)
-4. Claude opens PR with `Closes #<issue>` in body
-5. Add `awaiting-review` to issue
+1. Run `check-feature-budget.sh` — exit if ≥3 tasks completed in the last 3 hours
+2. Run `select-feature-issue.sh` — find oldest open issue labeled `implement-me` + `feature-task`; post claim comment; exit if none found
+3. Add `in-progress`, remove `implement-me`
+4. Fetch issue body + parent issue spec via `gh api`
+5. Run Claude Code with structured prompt
+6. On success: Claude opens PR with `Closes #<issue>` in body; add `awaiting-review`
+7. On failure/timeout: remove `in-progress`, restore `implement-me`, comment with error
 
 **Claude Code prompt structure:**
 ```
@@ -92,15 +95,25 @@ Task:
 Branch off main, implement the task, open a PR linking "Closes #<N>".
 ```
 
+**Stale detection (inside `select-feature-issue.sh`):**
+- If an issue has been `in-progress` for >2 hours with no open PR → remove `in-progress`, restore `implement-me`, post warning comment
+
 ### `close-feature-task.yml`
 
 **Trigger:** `pull_request.closed` where `merged = true`
 
 **Steps:**
 1. Parse PR body for `Closes #N` referencing a `feature-task` issue
-2. Add `done` label to linked issue
+2. Add `done` label to linked issue, remove `awaiting-review`
 3. Check off that task in the parent issue's checklist
 4. If all tasks complete → comment "All tasks complete" on parent issue
+
+### Supporting scripts
+
+| Script | Purpose |
+|---|---|
+| `.github/scripts/check-feature-budget.sh` | 3-task / 3-hour rolling window rate limiter |
+| `.github/scripts/select-feature-issue.sh` | Picks oldest `implement-me` issue, posts claim, detects stale `in-progress` |
 
 ## Local Push Script
 
@@ -130,6 +143,7 @@ Branch off main, implement the task, open a PR linking "Closes #<N>".
 ## Verification
 
 1. Run `push-feature.sh` with a sample spec + plan → verify parent + child issues created correctly on GitHub
-2. Apply `implement-me` label to a child issue → verify `implement-feature.yml` fires, Claude Code runs, PR opened
+2. Apply `implement-me` label to a child issue → wait for next 30-min cron tick → verify `implement-feature.yml` picks it up, Claude Code runs, PR opened
 3. Merge the PR → verify `close-feature-task.yml` checks off the task in the parent, labels issue `done`
 4. Complete all tasks → verify parent issue receives "All tasks complete" comment
+5. Apply `implement-me` to 4 issues within 3 hours → verify 4th is skipped by budget check, processed in next window
