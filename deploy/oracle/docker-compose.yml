@@ -10,6 +10,8 @@
 
 x-common-env: &common-env
   LOCAL_DATABASE_URL: postgresql://crawler:${POSTGRES_PASSWORD}@localhost:5432/crawler
+  # Point DATABASE_URL at local Postgres too — no Supabase in this deployment
+  DATABASE_URL: postgresql://crawler:${POSTGRES_PASSWORD}@localhost:5432/crawler
   REDIS_URL: redis://localhost:6379/0
   WORKER_ID_PREFIX: oracle
   LOG_LEVEL: INFO
