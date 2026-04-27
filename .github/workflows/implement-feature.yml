@@ -1,0 +1,138 @@
+name: Implement feature task
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: implement-feature
+  cancel-in-progress: false
+
+env:
+  BUDGET_PER_3H: 3
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  implement:
+    runs-on: ubuntu-latest
+    if: ${{ vars.ENABLE_FEATURE_IMPLEMENTER != 'false' }}
+    steps:
+      - name: Check required secrets
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::CLAUDE_CODE_OAUTH_TOKEN secret is not set — skipping."
+            exit 1
+          fi
+        env:
+          TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Select issue
+        id: select
+        run: .github/scripts/select-feature-issue.sh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+
+      - name: Check budget
+        id: budget
+        if: steps.select.outputs.selected != ''
+        run: .github/scripts/check-feature-budget.sh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUDGET_PER_3H: ${{ env.BUDGET_PER_3H }}
+
+      - name: Setup Node.js
+        if: >
+          steps.select.outputs.selected != '' &&
+          steps.budget.outputs.remaining > 0
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+
+      - name: Install Claude Code
+        if: >
+          steps.select.outputs.selected != '' &&
+          steps.budget.outputs.remaining > 0
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Build implementation context
+        id: context
+        if: >
+          steps.select.outputs.selected != '' &&
+          steps.budget.outputs.remaining > 0
+        run: |
+          ISSUE_NUM="${{ steps.select.outputs.selected }}"
+          REPO="${{ github.repository }}"
+
+          ISSUE_BODY=$(gh api "repos/$REPO/issues/$ISSUE_NUM" --jq '.body')
+          PARENT_NUM=$(echo "$ISSUE_BODY" | grep -oP '(?<=Parent: #)\d+' | head -1)
+          ISSUE_TITLE=$(gh api "repos/$REPO/issues/$ISSUE_NUM" --jq '.title')
+
+          if [ -n "$PARENT_NUM" ]; then
+            PARENT_BODY=$(gh api "repos/$REPO/issues/$PARENT_NUM" --jq '.body')
+          else
+            PARENT_BODY="(no parent issue found)"
+          fi
+
+          # Derive a branch name from the issue title
+          SLUG=$(echo "$ISSUE_TITLE" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/-\+/-/g' | sed 's/^-\|-$//g' | cut -c1-50)
+          BRANCH="feat/${SLUG}-issue-${ISSUE_NUM}"
+
+          echo "issue_num=$ISSUE_NUM" >> "$GITHUB_OUTPUT"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+          # Write context files for Claude Code
+          echo "$ISSUE_BODY" > /tmp/task_body.md
+          echo "$PARENT_BODY" > /tmp/parent_spec.md
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Implement task
+        id: implement
+        if: >
+          steps.select.outputs.selected != '' &&
+          steps.budget.outputs.remaining > 0
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ISSUE_NUM="${{ steps.select.outputs.selected }}"
+          BRANCH="${{ steps.context.outputs.branch }}"
+
+          claude --print "You are implementing a feature task for the jobseek project.
+
+          ## Parent Feature Spec
+
+          $(cat /tmp/parent_spec.md)
+
+          ## Task to Implement
+
+          $(cat /tmp/task_body.md)
+
+          ## Instructions
+
+          1. Create branch: git checkout -b $BRANCH
+          2. Implement the task described above. Follow existing code conventions in the repo.
+          3. Write or update tests if the task involves logic changes.
+          4. Open a PR with title matching the task title and body containing exactly: Closes #$ISSUE_NUM
+          5. Do not modify anything outside the scope of this task."
+
+      - name: Reset label on failure
+        if: >
+          failure() &&
+          steps.select.outputs.selected != ''
+        run: |
+          ISSUE_NUM="${{ steps.select.outputs.selected }}"
+          gh issue edit "$ISSUE_NUM" --repo "${{ github.repository }}" \
+            --remove-label "in-progress" --add-label "implement-me" 2>/dev/null || true
+          gh issue comment "$ISSUE_NUM" --repo "${{ github.repository }}" \
+            --body ":x: Implementation run failed or timed out. Reset to \`implement-me\` for retry on next cron tick." 2>/dev/null || true
+        env:
+          GH_TOKEN: ${{ github.token }}
