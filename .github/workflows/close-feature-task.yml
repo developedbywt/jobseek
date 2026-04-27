@@ -1,0 +1,75 @@
+name: Close feature task on merge
+
+on:
+  pull_request:
+    types: [closed]
+
+jobs:
+  close-task:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: read
+
+    steps:
+      - name: Update feature task issues on merge
+        run: |
+          set -euo pipefail
+          REPO="${{ github.repository }}"
+          PR="${{ github.event.pull_request.number }}"
+
+          # Get all issues closed by this PR
+          ISSUES=$(gh pr view "$PR" --repo "$REPO" \
+            --json closingIssuesReferences \
+            --jq '.closingIssuesReferences[].number')
+
+          if [ -z "$ISSUES" ]; then
+            echo "No linked issues found."
+            exit 0
+          fi
+
+          for ISSUE_NUM in $ISSUES; do
+            LABELS=$(gh issue view "$ISSUE_NUM" --repo "$REPO" --json labels --jq '[.labels[].name]')
+            IS_FEATURE_TASK=$(echo "$LABELS" | jq 'if index("feature-task") then true else false end' -r)
+
+            if [ "$IS_FEATURE_TASK" != "true" ]; then
+              echo "Issue #$ISSUE_NUM is not a feature-task — skipping."
+              continue
+            fi
+
+            echo "Closing feature task #$ISSUE_NUM..."
+
+            # Update labels
+            gh issue edit "$ISSUE_NUM" --repo "$REPO" \
+              --remove-label "awaiting-review" \
+              --remove-label "in-progress" \
+              --add-label "done" 2>/dev/null || true
+
+            # Find parent issue number from issue body
+            ISSUE_BODY=$(gh api "repos/$REPO/issues/$ISSUE_NUM" --jq '.body')
+            PARENT_NUM=$(echo "$ISSUE_BODY" | grep -oP '(?<=Parent: #)\d+' | head -1)
+
+            if [ -z "$PARENT_NUM" ]; then
+              echo "Issue #$ISSUE_NUM has no parent — skipping checklist update."
+              continue
+            fi
+
+            # Check off this task in the parent issue's checklist
+            PARENT_BODY=$(gh api "repos/$REPO/issues/$PARENT_NUM" --jq '.body')
+            UPDATED_BODY=$(echo "$PARENT_BODY" | sed "s/- \[ \] #$ISSUE_NUM /- [x] #$ISSUE_NUM /g")
+
+            gh api --method PATCH "repos/$REPO/issues/$PARENT_NUM" \
+              -f body="$UPDATED_BODY" > /dev/null
+            echo "Checked off #$ISSUE_NUM in parent #$PARENT_NUM."
+
+            # Check if all tasks in parent are done
+            REMAINING=$(echo "$UPDATED_BODY" | grep -c '- \[ \] #' || true)
+            if [ "$REMAINING" -eq 0 ]; then
+              gh issue comment "$PARENT_NUM" --repo "$REPO" \
+                --body ":white_check_mark: **All tasks complete!** This feature is fully implemented." 2>/dev/null || true
+              echo "All tasks done — commented on parent #$PARENT_NUM."
+            fi
+          done
+        env:
+          GH_TOKEN: ${{ github.token }}
