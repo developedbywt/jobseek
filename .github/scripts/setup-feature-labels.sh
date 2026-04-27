@@ -4,8 +4,8 @@
 
 set -euo pipefail
 
-# Default to origin remote if REPO not set
-REPO="${REPO:-$(git remote get-url origin | sed 's|https://github.com/||;s|\.git$||')}"
+# Default to upstream (org repo). Override with REPO= env var if needed.
+REPO="${REPO:-$(git remote get-url upstream 2>/dev/null | sed 's|https://github.com/||;s|\.git$||' || git remote get-url origin | sed 's|https://github.com/||;s|\.git$||')}"
 
 create_label() {
   local name="$1" color="$2" description="$3"
