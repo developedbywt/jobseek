@@ -4,12 +4,13 @@
 # Detects and recovers stale "in-progress" issues (claim > 2h, no open PR).
 #
 # Required env vars: GH_TOKEN, REPO, GITHUB_OUTPUT
-# Optional env vars: STALE_HOURS (default 2)
+# Optional env vars: STALE_HOURS (default 2), MAX_ATTEMPTS (default 3)
 
 set -euo pipefail
 
 : "${REPO:?REPO is required}"
 STALE_HOURS="${STALE_HOURS:-2}"
+MAX_ATTEMPTS="${MAX_ATTEMPTS:-3}"
 
 # --- Stale in-progress recovery ---
 echo "=== Checking for stale in-progress issues ==="
@@ -90,7 +91,22 @@ for ISSUE_NUM in $ISSUES; do
     fi
   fi
 
-  echo "Selecting issue #$ISSUE_NUM."
+  # Skip if this issue has exhausted its auto-implementation attempts
+  FAIL_COUNT=$(gh api "repos/$REPO/issues/$ISSUE_NUM/comments" \
+    --jq '[.[] | select(.body | startswith("<!-- feat-failed -->") or startswith("<!-- feat-stale-reset -->"))] | length' \
+    2>/dev/null || echo 0)
+
+  if [ "$FAIL_COUNT" -ge "$MAX_ATTEMPTS" ]; then
+    echo "Issue #$ISSUE_NUM has failed $FAIL_COUNT time(s) — escalating to needs-human."
+    gh issue edit "$ISSUE_NUM" --repo "$REPO" \
+      --remove-label "implement-me" --add-label "needs-human" 2>/dev/null || true
+    gh issue comment "$ISSUE_NUM" --repo "$REPO" \
+      --body "<!-- feat-exhausted -->
+:stop_sign: **Max attempts reached** ($FAIL_COUNT failures). Removed from auto-implementation queue. Please review and fix the task spec manually, then re-add the \`implement-me\` label to retry." 2>/dev/null || true
+    continue
+  fi
+
+  echo "Selecting issue #$ISSUE_NUM (fail count: $FAIL_COUNT)."
   SELECTED="$ISSUE_NUM"
   break
 done

@@ -25,7 +25,8 @@ permissions:
 jobs:
   review:
     runs-on: ubuntu-latest
-    if: ${{ vars.ENABLE_PR_REVIEW != 'false' }}
+    timeout-minutes: 45
+    if: ${{ vars.ENABLE_PR_REVIEW != 'false' && github.actor != 'github-actions[bot]' }}
     steps:
       - name: Check required secrets
         run: |
@@ -76,6 +77,38 @@ jobs:
           git config user.email "actions@github.com"
           git config user.name "GitHub Actions"
 
+          # Retry helper — for transient errors (network, rate limit) only
+          retry() {
+            local max=$1; shift
+            local attempt=0
+            until "$@"; do
+              attempt=$((attempt + 1))
+              [ "$attempt" -ge "$max" ] && return 1
+              echo "Attempt $attempt failed — retrying in $((attempt * 30))s..."
+              sleep $((attempt * 30))
+            done
+          }
+
+          # On unexpected crash: auto-retry once via workflow_dispatch, then escalate to reviewer
+          trap 'EXIT_CODE=$?; if [ "$EXIT_CODE" -ne 0 ]; then
+            HAS_RETRY=$(gh pr view "$PR_NUMBER" --json labels --jq "[.labels[].name] | contains([\"review-auto-retry\"])" 2>/dev/null || echo "false")
+            if [ "$HAS_RETRY" = "false" ]; then
+              gh pr edit "$PR_NUMBER" --add-label "review-auto-retry" 2>/dev/null || \
+                gh label create "review-auto-retry" --color "fbca04" --repo "$GITHUB_REPOSITORY" 2>/dev/null && \
+                gh pr edit "$PR_NUMBER" --add-label "review-auto-retry" 2>/dev/null || true
+              gh workflow run review-pr.yml -f pr_number="$PR_NUMBER" --repo "$GITHUB_REPOSITORY" 2>/dev/null || true
+              gh pr comment "$PR_NUMBER" --body "⚠️ **Codex Review — crashed, auto-retrying**
+
+          The review workflow hit an error and has been re-queued automatically." 2>/dev/null || true
+            else
+              gh pr edit "$PR_NUMBER" --remove-label "review-auto-retry" 2>/dev/null || true
+              gh pr comment "$PR_NUMBER" --body "❌ **Codex Review — failed after auto-retry**
+
+          👋 @$REVIEWER — automated review failed twice. Please review this PR manually." 2>/dev/null || true
+              gh pr edit "$PR_NUMBER" --add-reviewer "$REVIEWER" 2>/dev/null || true
+            fi
+          fi' EXIT
+
           ROUND=0
           VERDICT="FAIL"
 
@@ -83,21 +116,10 @@ jobs:
             ROUND=$((ROUND + 1))
             echo "=== Review round $ROUND ==="
 
-            git diff "origin/$BASE_BRANCH"..."$PR_BRANCH" > /tmp/pr.diff
-
-            REVIEW_PROMPT="You are a code reviewer for the jobseek project (Python crawler + Next.js frontend).
-
-            Review the following PR diff. Write your full review to /tmp/review.md.
-            On the very last line write exactly: VERDICT:PASS or VERDICT:FAIL
-            Do NOT modify any source files — only write to /tmp/review.md.
-
-            Focus on: correctness, security, edge cases, code style consistency with the existing codebase.
-
-            Diff:
-            $(cat /tmp/pr.diff)"
+            git diff "origin/$BASE_BRANCH"..."$PR_BRANCH" | head -c 100000 > /tmp/pr.diff
 
             rm -f /tmp/review.md
-            codex exec review \
+            retry 3 codex exec review \
               --full-auto \
               -m "$CODEX_MODEL" \
               --base "origin/$BASE_BRANCH" \
@@ -120,7 +142,7 @@ jobs:
               Fix all of them. Commit your changes and push: git push origin $PR_BRANCH
               Do not open a new PR — one already exists."
 
-              codex exec --full-auto -m "$CODEX_MODEL" "$FIX_PROMPT"
+              retry 3 codex exec --full-auto -m "$CODEX_MODEL" "$FIX_PROMPT"
 
               gh pr comment "$PR_NUMBER" --body "🔧 **Codex applied fixes (round $ROUND)**
 
@@ -131,6 +153,9 @@ jobs:
 
             fi
           done
+
+          # Disarm the trap — we're exiting cleanly after posting the final review
+          trap - EXIT
 
           # Post final review
           if [ "$VERDICT" = "PASS" ]; then

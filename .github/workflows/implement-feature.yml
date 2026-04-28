@@ -123,6 +123,18 @@ jobs:
           git config user.email "actions@github.com"
           git config user.name "GitHub Actions"
 
+          # Retry helper — for transient errors (network, rate limit) only
+          retry() {
+            local max=$1; shift
+            local attempt=0
+            until "$@"; do
+              attempt=$((attempt + 1))
+              [ "$attempt" -ge "$max" ] && return 1
+              echo "Attempt $attempt failed — retrying in $((attempt * 30))s..."
+              sleep $((attempt * 30))
+            done
+          }
+
           IMPLEMENT_PROMPT="You are implementing a feature task for the jobseek project.
 
           ## Parent Feature Spec
@@ -139,11 +151,30 @@ jobs:
           5. Push the branch: git push origin $BRANCH
           6. Do NOT open a PR — the pipeline will do that after review."
 
-          echo "=== Step 1: Implement ==="
-          codex exec --full-auto -m "$CODEX_MODEL" "$IMPLEMENT_PROMPT"
+          # ── Resume detection ──────────────────────────────────────────────
+          COMMITS_ON_BRANCH=0
+          if git ls-remote --heads origin "$BRANCH" | grep -q .; then
+            git fetch origin "$BRANCH":"$BRANCH" 2>/dev/null || true
+            COMMITS_ON_BRANCH=$(git log origin/main.."$BRANCH" --oneline 2>/dev/null | wc -l | tr -d ' ' || echo 0)
+          fi
 
-          # Ensure we're on the right branch and it's pushed
-          git checkout "$BRANCH" 2>/dev/null || true
+          if [ "$COMMITS_ON_BRANCH" -gt 0 ]; then
+            echo "=== Branch $BRANCH has $COMMITS_ON_BRANCH commit(s) ahead of main — resuming from review phase ==="
+            git checkout "$BRANCH"
+          else
+            echo "=== Step 1: Implement ==="
+            retry 3 codex exec --full-auto -m "$CODEX_MODEL" "$IMPLEMENT_PROMPT"
+            git checkout "$BRANCH" 2>/dev/null || true
+          fi
+
+          # ── PR-exists check — skip creation if already open ───────────────
+          EXISTING_PR=$(gh pr list --head "$BRANCH" --json number --jq '.[0].number // empty' 2>/dev/null || true)
+          if [ -n "$EXISTING_PR" ]; then
+            echo "=== PR #$EXISTING_PR already exists — notifying reviewer and exiting ==="
+            gh pr edit "$EXISTING_PR" --add-reviewer "$REVIEWER" 2>/dev/null || true
+            gh pr comment "$EXISTING_PR" --body "👋 @$REVIEWER — resumed after a previous run. PR is ready for your review."
+            exit 0
+          fi
 
           ROUND=0
           VERDICT="FAIL"
@@ -152,21 +183,10 @@ jobs:
             ROUND=$((ROUND + 1))
             echo "=== Step 2: Review (round $ROUND) ==="
 
-            git diff origin/main..."$BRANCH" > /tmp/pr.diff
-
-            REVIEW_PROMPT="You are a code reviewer for the jobseek project.
-
-            Review the following PR diff. Write your full review to /tmp/review.md.
-            On the very last line of /tmp/review.md write exactly VERDICT:PASS or VERDICT:FAIL.
-            Do NOT modify any source files — only write to /tmp/review.md.
-
-            Focus on: correctness, security, edge cases, code style consistency.
-
-            Diff:
-            $(cat /tmp/pr.diff)"
+            git diff origin/main..."$BRANCH" | head -c 100000 > /tmp/pr.diff
 
             rm -f /tmp/review.md
-            codex exec review \
+            retry 3 codex exec review \
               --full-auto \
               -m "$CODEX_MODEL" \
               --base "origin/main" \
@@ -189,7 +209,7 @@ jobs:
               Fix all of them. Commit the fixes and push: git push origin $BRANCH.
               Do not open a PR."
 
-              codex exec --full-auto -m "$CODEX_MODEL" "$FIX_PROMPT"
+              retry 3 codex exec --full-auto -m "$CODEX_MODEL" "$FIX_PROMPT"
               git checkout "$BRANCH" 2>/dev/null || true
             fi
           done
@@ -213,6 +233,8 @@ jobs:
           PR_NUMBER=$(echo "$PR_URL" | grep -oP '\d+$')
 
           echo "=== Step 5: Notify reviewer ==="
+          gh issue edit "$ISSUE_NUM" --repo "${{ github.repository }}" \
+            --remove-label "in-progress" --add-label "awaiting-review" 2>/dev/null || true
           gh pr edit "$PR_NUMBER" --add-reviewer "$REVIEWER" 2>/dev/null || true
           gh pr comment "$PR_NUMBER" --body "👋 @$REVIEWER — implementation is done and passed Codex review (${ROUND} round(s)). Ready for your final review."
 
@@ -247,13 +269,14 @@ jobs:
 
       - name: Reset label on failure
         if: >
-          failure() &&
+          (failure() || cancelled()) &&
           steps.select.outputs.selected != ''
         run: |
           ISSUE_NUM="${{ steps.select.outputs.selected }}"
           gh issue edit "$ISSUE_NUM" --repo "${{ github.repository }}" \
             --remove-label "in-progress" --add-label "implement-me" 2>/dev/null || true
           gh issue comment "$ISSUE_NUM" --repo "${{ github.repository }}" \
-            --body ":x: Implementation run failed or timed out. Reset to \`implement-me\` for retry on next cron tick." 2>/dev/null || true
+            --body "<!-- feat-failed -->
+:x: Implementation run failed or timed out. Reset to \`implement-me\` for retry on next cron tick." 2>/dev/null || true
         env:
           GH_TOKEN: ${{ github.token }}
