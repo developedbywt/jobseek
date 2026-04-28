@@ -24,12 +24,13 @@ jobs:
     steps:
       - name: Check required secrets
         run: |
-          if [ -z "$TOKEN" ]; then
-            echo "::error::CLAUDE_CODE_OAUTH_TOKEN secret is not set — skipping."
+          if [ -z "$OPENAI_KEY" ] && [ -z "$CLAUDE_TOKEN" ]; then
+            echo "::error::Neither OPENAI_API_KEY nor CLAUDE_ACCESS_TOKEN is set — skipping."
             exit 1
           fi
         env:
-          TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          OPENAI_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CLAUDE_TOKEN: ${{ secrets.CLAUDE_ACCESS_TOKEN }}
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
@@ -56,11 +57,11 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Install Claude Code
+      - name: Install agents
         if: >
           steps.select.outputs.selected != '' &&
           steps.budget.outputs.remaining > 0
-        run: npm install -g @anthropic-ai/claude-code
+        run: npm install -g @anthropic-ai/claude-code @openai/codex
 
       - name: Setup Python and crawler deps
         if: >
@@ -70,19 +71,47 @@ jobs:
           pip install uv
           cd apps/crawler && uv sync
 
-      - name: Resolve issue
+      - name: Build resolve context
+        if: steps.select.outputs.selected != ''
+        run: |
+          {
+            echo 'AGENT_PROMPT<<AGENT_PROMPT_EOF'
+            echo "Run: ws task --issue ${{ steps.select.outputs.selected }}"
+            echo ""
+            echo "Follow the instructions printed by ws task. The ws tool will guide"
+            echo "you through the parallel pipeline: pre-verify, create workspace,"
+            echo "spawn subagents for enrichment/logos/boards, test configs, submit."
+            echo ""
+            echo "Only process this ONE issue. Do not process any others."
+            echo 'AGENT_PROMPT_EOF'
+          } >> "$GITHUB_ENV"
+
+      - name: Run Codex
+        id: codex_run
         if: >
           steps.select.outputs.selected != '' &&
           steps.budget.outputs.remaining > 0
+        continue-on-error: true
         env:
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          GH_TOKEN: ${{ github.token }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
+          if [ -z "$OPENAI_API_KEY" ] || ! command -v codex &>/dev/null; then
+            echo "Codex not available — skipping."
+            exit 1
+          fi
           cd apps/crawler
-          claude --print "Run: ws task --issue ${{ steps.select.outputs.selected }}
+          codex --approval-mode full-auto "$AGENT_PROMPT"
 
-          Follow the instructions printed by ws task. The ws tool will guide
-          you through the parallel pipeline: pre-verify, create workspace,
-          spawn subagents for enrichment/logos/boards, test configs, submit.
-
-          Only process this ONE issue. Do not process any others."
+      - name: Run Claude Code (fallback)
+        if: >
+          steps.select.outputs.selected != '' &&
+          steps.budget.outputs.remaining > 0 &&
+          steps.codex_run.outcome != 'success'
+        uses: grll/claude-code-action@beta
+        with:
+          direct_prompt: ${{ env.AGENT_PROMPT }}
+          use_oauth: "true"
+          claude_access_token: ${{ secrets.CLAUDE_ACCESS_TOKEN }}
+          claude_refresh_token: ${{ secrets.CLAUDE_REFRESH_TOKEN }}
+          claude_expires_at: ${{ secrets.CLAUDE_EXPIRES_AT }}
+          secrets_admin_pat: ${{ secrets.SECRETS_ADMIN_PAT }}

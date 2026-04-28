@@ -1,0 +1,131 @@
+name: Codex PR Review & Fix
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: review-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  MAX_REVIEW_ROUNDS: 2
+  CODEX_MODEL: gpt-5.5-2026-04-23
+  REVIEWER: Milky-Mac
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    if: ${{ vars.ENABLE_PR_REVIEW != 'false' }}
+    steps:
+      - name: Check required secrets
+        run: |
+          if [ -z "$OPENAI_KEY" ]; then
+            echo "::error::OPENAI_API_KEY is not set — skipping PR review."
+            exit 1
+          fi
+        env:
+          OPENAI_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+
+      - name: Install Codex
+        run: npm install -g @openai/codex
+
+      - name: Review, fix and approve loop
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+          BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+          CODEX_MODEL: ${{ env.CODEX_MODEL }}
+          MAX_REVIEW_ROUNDS: ${{ env.MAX_REVIEW_ROUNDS }}
+          REVIEWER: ${{ env.REVIEWER }}
+        run: |
+          set -e
+
+          git config user.email "actions@github.com"
+          git config user.name "GitHub Actions"
+
+          ROUND=0
+          VERDICT="FAIL"
+
+          while [ "$VERDICT" = "FAIL" ] && [ "$ROUND" -lt "$MAX_REVIEW_ROUNDS" ]; do
+            ROUND=$((ROUND + 1))
+            echo "=== Review round $ROUND ==="
+
+            git diff "origin/$BASE_BRANCH"..."$PR_BRANCH" > /tmp/pr.diff
+
+            REVIEW_PROMPT="You are a code reviewer for the jobseek project (Python crawler + Next.js frontend).
+
+            Review the following PR diff. Write your full review to /tmp/review.md.
+            On the very last line write exactly: VERDICT:PASS or VERDICT:FAIL
+            Do NOT modify any source files — only write to /tmp/review.md.
+
+            Focus on: correctness, security, edge cases, code style consistency with the existing codebase.
+
+            Diff:
+            $(cat /tmp/pr.diff)"
+
+            rm -f /tmp/review.md
+            codex --model "$CODEX_MODEL" --approval-mode full-auto "$REVIEW_PROMPT"
+            git checkout -- . 2>/dev/null || true
+
+            VERDICT=$(grep -oP 'VERDICT:\K(PASS|FAIL)' /tmp/review.md | tail -1 || echo "FAIL")
+            REVIEW_BODY=$(sed '/VERDICT:/d' /tmp/review.md)
+            echo "Verdict: $VERDICT"
+
+            if [ "$VERDICT" = "FAIL" ] && [ "$ROUND" -lt "$MAX_REVIEW_ROUNDS" ]; then
+              echo "=== Applying fixes (round $ROUND) ==="
+
+              FIX_PROMPT="You are fixing code review issues in the jobseek project on branch $PR_BRANCH.
+
+              The reviewer found these issues:
+              $REVIEW_BODY
+
+              Fix all of them. Commit your changes and push: git push origin $PR_BRANCH
+              Do not open a new PR — one already exists."
+
+              codex --model "$CODEX_MODEL" --approval-mode full-auto "$FIX_PROMPT"
+
+              gh pr comment "$PR_NUMBER" --body "🔧 **Codex applied fixes (round $ROUND)**
+
+              Issues found:
+              $REVIEW_BODY
+
+              Re-reviewing..."
+
+            fi
+          done
+
+          # Post final review
+          if [ "$VERDICT" = "PASS" ]; then
+            gh pr comment "$PR_NUMBER" --body "✅ **Codex Review — PASSED** (${ROUND} round(s))
+
+          $REVIEW_BODY
+
+          ---
+          👋 @$REVIEWER — this PR passed automated review and is ready for your final look."
+            gh pr edit "$PR_NUMBER" --add-reviewer "$REVIEWER" 2>/dev/null || true
+          else
+            gh pr comment "$PR_NUMBER" --body "⚠️ **Codex Review — needs attention** (${MAX_REVIEW_ROUNDS} rounds exhausted)
+
+          $REVIEW_BODY
+
+          ---
+          👋 @$REVIEWER — automated fixes were attempted but issues remain. Please review manually."
+            gh pr edit "$PR_NUMBER" --add-reviewer "$REVIEWER" 2>/dev/null || true
+          fi
