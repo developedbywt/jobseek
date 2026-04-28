@@ -3,9 +3,14 @@ name: Codex PR Review & Fix
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to review"
+        required: true
 
 concurrency:
-  group: review-pr-${{ github.event.pull_request.number }}
+  group: review-pr-${{ github.event.pull_request.number || inputs.pr_number }}
   cancel-in-progress: true
 
 env:
@@ -31,9 +36,20 @@ jobs:
         env:
           OPENAI_KEY: ${{ secrets.OPENAI_API_KEY }}
 
+      - name: Resolve PR metadata
+        id: pr_meta
+        run: |
+          PR="${{ github.event.pull_request.number || inputs.pr_number }}"
+          DATA=$(gh api "repos/${{ github.repository }}/pulls/$PR")
+          echo "number=$PR" >> "$GITHUB_OUTPUT"
+          echo "head_ref=$(echo "$DATA" | jq -r '.head.ref')" >> "$GITHUB_OUTPUT"
+          echo "base_ref=$(echo "$DATA" | jq -r '.base.ref')" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
-          ref: ${{ github.event.pull_request.head.ref }}
+          ref: ${{ steps.pr_meta.outputs.head_ref }}
           fetch-depth: 0
 
       - name: Setup Node.js
@@ -48,9 +64,9 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
-          BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+          PR_NUMBER: ${{ steps.pr_meta.outputs.number }}
+          PR_BRANCH: ${{ steps.pr_meta.outputs.head_ref }}
+          BASE_BRANCH: ${{ steps.pr_meta.outputs.base_ref }}
           CODEX_MODEL: ${{ env.CODEX_MODEL }}
           MAX_REVIEW_ROUNDS: ${{ env.MAX_REVIEW_ROUNDS }}
           REVIEWER: ${{ env.REVIEWER }}
