@@ -140,7 +140,7 @@ jobs:
           6. Do NOT open a PR — the pipeline will do that after review."
 
           echo "=== Step 1: Implement ==="
-          codex --model "$CODEX_MODEL" --approval-mode full-auto "$IMPLEMENT_PROMPT"
+          codex exec --full-auto -m "$CODEX_MODEL" "$IMPLEMENT_PROMPT"
 
           # Ensure we're on the right branch and it's pushed
           git checkout "$BRANCH" 2>/dev/null || true
@@ -166,8 +166,13 @@ jobs:
             $(cat /tmp/pr.diff)"
 
             rm -f /tmp/review.md
-            codex --model "$CODEX_MODEL" --approval-mode full-auto "$REVIEW_PROMPT"
-            git checkout -- . 2>/dev/null || true  # reset any accidental changes
+            codex exec review \
+              --full-auto \
+              -m "$CODEX_MODEL" \
+              --base "origin/main" \
+              -o /tmp/review.md \
+              "Review for correctness, security, edge cases, and code style. End with VERDICT:PASS or VERDICT:FAIL on the last line."
+            git checkout -- . 2>/dev/null || true
 
             VERDICT=$(grep -oP 'VERDICT:\K(PASS|FAIL)' /tmp/review.md | tail -1 || echo "FAIL")
             echo "Review verdict: $VERDICT"
@@ -184,7 +189,7 @@ jobs:
               Fix all of them. Commit the fixes and push: git push origin $BRANCH.
               Do not open a PR."
 
-              codex --model "$CODEX_MODEL" --approval-mode full-auto "$FIX_PROMPT"
+              codex exec --full-auto -m "$CODEX_MODEL" "$FIX_PROMPT"
               git checkout "$BRANCH" 2>/dev/null || true
             fi
           done

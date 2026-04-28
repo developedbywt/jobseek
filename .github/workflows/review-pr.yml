@@ -97,7 +97,12 @@ jobs:
             $(cat /tmp/pr.diff)"
 
             rm -f /tmp/review.md
-            codex --model "$CODEX_MODEL" --approval-mode full-auto "$REVIEW_PROMPT"
+            codex exec review \
+              --full-auto \
+              -m "$CODEX_MODEL" \
+              --base "origin/$BASE_BRANCH" \
+              -o /tmp/review.md \
+              "Review for correctness, security, edge cases, and code style. End your response with VERDICT:PASS or VERDICT:FAIL on the last line."
             git checkout -- . 2>/dev/null || true
 
             VERDICT=$(grep -oP 'VERDICT:\K(PASS|FAIL)' /tmp/review.md | tail -1 || echo "FAIL")
@@ -115,7 +120,7 @@ jobs:
               Fix all of them. Commit your changes and push: git push origin $PR_BRANCH
               Do not open a new PR — one already exists."
 
-              codex --model "$CODEX_MODEL" --approval-mode full-auto "$FIX_PROMPT"
+              codex exec --full-auto -m "$CODEX_MODEL" "$FIX_PROMPT"
 
               gh pr comment "$PR_NUMBER" --body "🔧 **Codex applied fixes (round $ROUND)**
 
