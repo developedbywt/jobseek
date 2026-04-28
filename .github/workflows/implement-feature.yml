@@ -276,7 +276,6 @@ jobs:
           gh issue edit "$ISSUE_NUM" --repo "${{ github.repository }}" \
             --remove-label "in-progress" --add-label "implement-me" 2>/dev/null || true
           gh issue comment "$ISSUE_NUM" --repo "${{ github.repository }}" \
-            --body "<!-- feat-failed -->
-:x: Implementation run failed or timed out. Reset to \`implement-me\` for retry on next cron tick." 2>/dev/null || true
+            --body "<!-- feat-failed --> :x: Implementation run failed or timed out. Reset to \`implement-me\` for retry on next cron tick." 2>/dev/null || true
         env:
           GH_TOKEN: ${{ github.token }}
