@@ -832,6 +832,8 @@ export const jobQueue = pgTable(
     missingKeywords: text("missing_keywords").array(),
     fitExplanation: text("fit_explanation"),
     analyzedAt: timestamp("analyzed_at", { withTimezone: true }),
+    customizedR2Key: text("customized_r2_key"),
+    customizedAt: timestamp("customized_at", { withTimezone: true }),
   },
   (table) => [
     uniqueIndex("idx_jq_user_posting").on(table.userId, table.postingId),
@@ -847,6 +849,7 @@ export const userResume = pgTable("user_resume", {
     .references(() => user.id, { onDelete: "cascade" }),
   filename: text("filename").notNull(),
   keywords: text("keywords").array().notNull().default([]),
+  latexSource: text("latex_source"),
   updatedAt: timestamp("updated_at", { withTimezone: true })
     .defaultNow()
     .$onUpdate(() => new Date())

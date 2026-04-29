@@ -5,56 +5,73 @@ import { db } from "@/db";
 import { userResume } from "@/db/schema";
 import { getSessionUserId } from "@/lib/sessionCache";
 import { extractKeywords } from "@/lib/resume/extract-keywords";
+import { stripLatexCommands } from "@/lib/resume/strip-latex";
+
+export type ResumeInfo = {
+  filename: string;
+  keywords: string[];
+  updatedAt: string;
+  hasLatexSource: boolean;
+};
 
 export async function uploadResume(params: {
   filename: string;
   content: string;
-}): Promise<{ uploaded: boolean; filename: string }> {
+  latexSource?: string;
+}): Promise<ResumeInfo> {
   const userId = await getSessionUserId();
   if (!userId) throw new Error("Not authenticated");
 
-  const { filename, content } = params;
+  const { filename, content, latexSource } = params;
 
-  // Extract keywords from file content
-  const keywords = await extractKeywords(content);
+  const textForKeywords = latexSource ? stripLatexCommands(latexSource) : content;
+  const keywords = await extractKeywords(textForKeywords);
 
-  // Upsert resume record
   const [result] = await db
     .insert(userResume)
     .values({
       userId,
       filename,
       keywords,
+      latexSource: latexSource ?? null,
     })
     .onConflictDoUpdate({
       target: userResume.userId,
       set: {
         filename,
         keywords,
+        latexSource: latexSource ?? null,
+        updatedAt: new Date(),
       },
     })
-    .returning({ filename: userResume.filename });
+    .returning();
 
-  return { uploaded: true, filename: result.filename };
+  return {
+    filename: result.filename,
+    keywords: result.keywords,
+    updatedAt: result.updatedAt.toISOString(),
+    hasLatexSource: result.latexSource !== null,
+  };
 }
 
-export async function getResume(): Promise<{
-  filename: string;
-  keywords: string[];
-} | null> {
+export async function getResume(): Promise<ResumeInfo | null> {
   const userId = await getSessionUserId();
   if (!userId) return null;
 
   const [resume] = await db
-    .select({
-      filename: userResume.filename,
-      keywords: userResume.keywords,
-    })
+    .select()
     .from(userResume)
     .where(eq(userResume.userId, userId))
     .limit(1);
 
-  return resume || null;
+  if (!resume) return null;
+
+  return {
+    filename: resume.filename,
+    keywords: resume.keywords,
+    updatedAt: resume.updatedAt.toISOString(),
+    hasLatexSource: resume.latexSource !== null,
+  };
 }
 
 export async function deleteResume(): Promise<void> {

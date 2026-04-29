@@ -14,6 +14,8 @@ export type QueueEntry = {
   missingKeywords: string[];
   fitExplanation: string | null;
   analyzedAt: string | null;
+  customizedR2Key: string | null;
+  customizedAt: string | null;
   posting: {
     id: string;
     title: string | null;
@@ -132,6 +134,8 @@ export async function getQueueItems(params: {
       missingKeywords: jobQueue.missingKeywords,
       fitExplanation: jobQueue.fitExplanation,
       analyzedAt: jobQueue.analyzedAt,
+      customizedR2Key: jobQueue.customizedR2Key,
+      customizedAt: jobQueue.customizedAt,
       postingId: jobPosting.id,
       postingTitle: sql<string | null>`${jobPosting.titles}[1]`,
       postingSourceUrl: jobPosting.sourceUrl,
@@ -156,6 +160,8 @@ export async function getQueueItems(params: {
     missingKeywords: r.missingKeywords ?? [],
     fitExplanation: r.fitExplanation,
     analyzedAt: r.analyzedAt?.toISOString() ?? null,
+    customizedR2Key: r.customizedR2Key ?? null,
+    customizedAt: r.customizedAt?.toISOString() ?? null,
     posting: {
       id: r.postingId,
       title: r.postingTitle,

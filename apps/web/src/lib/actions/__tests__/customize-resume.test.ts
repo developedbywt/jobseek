@@ -1,61 +1,75 @@
 import { describe, it, expect } from "vitest";
+import { buildCustomizePrompt, parseCustomizeResponse } from "@/lib/resume/customize-prompt";
 
-describe("Resume Customization", () => {
-  it("should accept missing keywords and job title", () => {
-    const params = {
-      jobTitle: "Senior Software Engineer",
-      missingKeywords: ["Kubernetes", "Terraform", "Go"],
-    };
-
-    expect(params.missingKeywords).toContain("Kubernetes");
-    expect(params.jobTitle).toBe("Senior Software Engineer");
+describe("buildCustomizePrompt", () => {
+  it("includes missing keywords in user message", () => {
+    const prompt = buildCustomizePrompt({
+      title: "Backend Engineer",
+      company: "Stripe",
+      jdText: "We use Kafka and gRPC extensively.",
+      missingKeywords: ["Kafka", "gRPC"],
+      matchedKeywords: ["Go", "PostgreSQL"],
+      latexSource: "\\begin{document}\\item Built APIs with Go\\end{document}",
+    });
+    expect(prompt.user).toContain("Kafka");
+    expect(prompt.user).toContain("gRPC");
+    expect(prompt.user).toContain("Go");
+    expect(prompt.user).toContain("PostgreSQL");
+    expect(prompt.user).toContain("Backend Engineer");
+    expect(prompt.user).toContain("Stripe");
   });
 
-  it("should return customization result structure", () => {
-    const result = {
-      customized: false,
-      original: "resume.tex",
-      error: "Resume not found",
-    };
-
-    expect(result).toHaveProperty("customized");
-    expect(result).toHaveProperty("original");
+  it("includes latex source in user message", () => {
+    const prompt = buildCustomizePrompt({
+      title: "SWE",
+      company: "Acme",
+      jdText: "Java required",
+      missingKeywords: ["Java"],
+      matchedKeywords: [],
+      latexSource: "\\item Developed systems",
+    });
+    expect(prompt.user).toContain("\\item Developed systems");
   });
 
-  it("should track customized vs original", () => {
-    const successResult = {
-      customized: true,
-      original: "resume.tex",
-      customized_content: "\\documentclass{article}...",
-      preview: "Customized with 3 keywords",
-    };
+  it("system prompt contains all required rules", () => {
+    const prompt = buildCustomizePrompt({
+      title: "SWE",
+      company: "Acme",
+      jdText: "Java required",
+      missingKeywords: [],
+      matchedKeywords: [],
+      latexSource: "",
+    });
+    expect(prompt.system).toContain("work experience bullet points");
+    expect(prompt.system).toContain("one page");
+    expect(prompt.system).toContain("customized_latex");
+    expect(prompt.system).toContain("changes");
+  });
+});
 
-    expect(successResult.customized).toBe(true);
-    expect(successResult).toHaveProperty("customized_content");
-    expect(successResult).toHaveProperty("preview");
+describe("parseCustomizeResponse", () => {
+  it("parses valid JSON response", () => {
+    const raw = `{"changes":[{"original":"Built APIs with Java","replacement":"Built APIs with Kotlin","keyword_added":"Kotlin","rationale":"Kotlin is JVM-compatible"}],"customized_latex":"\\\\item Built APIs with Kotlin"}`;
+    const result = parseCustomizeResponse(raw);
+    expect(result).not.toBeNull();
+    expect(result!.changes).toHaveLength(1);
+    expect(result!.changes[0].keyword_added).toBe("Kotlin");
+    expect(result!.customized_latex).toContain("Kotlin");
   });
 
-  it("should handle multiple missing keywords", () => {
-    const keywords = ["Python", "FastAPI", "PostgreSQL", "Redis", "Docker"];
-    expect(keywords.length).toBeGreaterThan(3);
+  it("extracts JSON from markdown code block", () => {
+    const raw = "```json\n{\"changes\":[],\"customized_latex\":\"hello\"}\n```";
+    const result = parseCustomizeResponse(raw);
+    expect(result).not.toBeNull();
+    expect(result!.customized_latex).toBe("hello");
   });
 
-  it("should validate keyword compatibility", () => {
-    const pythonCompatible = ["FastAPI", "Django", "Flask", "PostgreSQL"];
-    const pythonIncompatible = ["Spring Boot", "C#", "ASP.NET"];
-
-    expect(pythonCompatible).toContain("PostgreSQL");
-    expect(pythonIncompatible).not.toContain("PostgreSQL");
+  it("returns null for invalid JSON", () => {
+    expect(parseCustomizeResponse("not json at all")).toBeNull();
   });
 
-  it("should accept optional original resume content", () => {
-    const params = {
-      jobTitle: "Senior Engineer",
-      missingKeywords: ["Kubernetes"],
-      originalContent: "test resume content",
-    };
-
-    expect(params).toHaveProperty("originalContent");
-    expect(typeof params.originalContent).toBe("string");
+  it("returns null if required fields missing", () => {
+    expect(parseCustomizeResponse('{"changes":[]}')).toBeNull();
+    expect(parseCustomizeResponse('{"customized_latex":""}')).toBeNull();
   });
 });

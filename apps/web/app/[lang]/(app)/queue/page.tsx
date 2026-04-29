@@ -2,7 +2,9 @@
 
 import { useEffect, useState } from "react";
 import { getQueueItems, removeFromQueue, analyzeQueueItem } from "@/lib/actions/queue";
+import { getResume } from "@/lib/actions/resume";
 import type { QueueEntry } from "@/lib/actions/queue";
+import type { ResumeInfo } from "@/lib/actions/resume";
 import { QueueJobCard } from "@/components/queue/QueueJobCard";
 import { Button } from "@/components/ui/Button";
 import Link from "next/link";
@@ -13,16 +15,18 @@ export default function QueuePage() {
   const [items, setItems] = useState<QueueEntry[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [resume, setResume] = useState<ResumeInfo | null>(null);
 
   useEffect(() => {
-    async function loadQueue() {
+    async function load() {
       try {
-        const { items, total } = await getQueueItems({
-          offset: 0,
-          limit: ITEMS_PER_PAGE,
-        });
+        const [{ items, total }, resumeInfo] = await Promise.all([
+          getQueueItems({ offset: 0, limit: ITEMS_PER_PAGE }),
+          getResume(),
+        ]);
         setItems(items);
         setTotal(total);
+        setResume(resumeInfo);
       } catch (err) {
         console.error("Failed to load queue:", err);
       } finally {
@@ -30,7 +34,7 @@ export default function QueuePage() {
       }
     }
 
-    loadQueue();
+    load();
   }, []);
 
   async function handleRemove(queueId: string) {
@@ -48,7 +52,6 @@ export default function QueuePage() {
       const item = items.find((i) => i.id === queueId);
       if (!item) return;
       await analyzeQueueItem(queueId, item.posting.id);
-      // Refetch the item to get updated analysis
       const { items: updated } = await getQueueItems({
         offset: 0,
         limit: ITEMS_PER_PAGE,
@@ -91,6 +94,7 @@ export default function QueuePage() {
               item={item}
               onRemove={handleRemove}
               onAnalyze={handleAnalyze}
+              hasLatexSource={resume?.hasLatexSource ?? false}
             />
           ))}
         </div>

@@ -2,78 +2,82 @@
 
 import { useState } from "react";
 import type { QueueEntry } from "@/lib/actions/queue";
-import { customizeResume } from "@/lib/actions/customize-resume";
-import { saveCustomization } from "@/lib/actions/save-customization";
+import {
+  customizeResume,
+  removeCustomizedResume,
+  getCustomizedResumeUrl,
+} from "@/lib/actions/customize-resume";
 import { scoreColor, formatScore } from "@/lib/queue-utils";
-import { ResumeCustomizationModal } from "@/components/resume/ResumeCustomizationModal";
+import { Download, FileText, Trash2 } from "lucide-react";
 
 export function QueueJobCard({
   item,
   onRemove,
   onAnalyze,
+  hasLatexSource,
 }: {
   item: QueueEntry;
   onRemove: (queueId: string) => void;
   onAnalyze: (queueId: string) => void;
+  hasLatexSource: boolean;
 }) {
-  const { id, posting, company, overlapScore, matchedKeywords, missingKeywords, fitExplanation, analyzedAt } = item;
-  const [modalOpen, setModalOpen] = useState(false);
-  const [customizing, setCustomizing] = useState(false);
-  const [customizationResult, setCustomizationResult] = useState<{
-    original: string;
-    customized_content: string;
-    insertedKeywords: string[];
-  } | null>(null);
+  const {
+    id,
+    posting,
+    company,
+    overlapScore,
+    matchedKeywords,
+    missingKeywords,
+    fitExplanation,
+    analyzedAt,
+  } = item;
 
-  const handleCustomizeClick = async () => {
-    setModalOpen(true);
-    setCustomizing(true);
+  const [generating, setGenerating] = useState(false);
+  const [generateError, setGenerateError] = useState<string | null>(null);
+  const [localCustomizedKey, setLocalCustomizedKey] = useState(
+    item.customizedR2Key,
+  );
+
+  async function handleGenerate() {
+    setGenerating(true);
+    setGenerateError(null);
     try {
-      const result = await customizeResume({
-        jobTitle: posting.title || "Position",
-        missingKeywords,
-      });
-      if (result.customized && result.customized_content) {
-        setCustomizationResult({
-          original: result.original,
-          customized_content: result.customized_content,
-          insertedKeywords: missingKeywords,
-        });
+      const result = await customizeResume(id);
+      if (result.success) {
+        setLocalCustomizedKey(`resumes/${posting.id}.tex`);
+      } else {
+        setGenerateError(result.error ?? "Generation failed.");
       }
-    } catch (err) {
-      console.error("Failed to customize resume:", err);
+    } catch {
+      setGenerateError("Generation failed. Please try again.");
     } finally {
-      setCustomizing(false);
+      setGenerating(false);
     }
-  };
+  }
 
-  const handleAcceptCustomization = async () => {
-    if (!customizationResult) return;
-    try {
-      await saveCustomization({
-        queueId: id,
-        postingId: posting.id,
-        customizedContent: customizationResult.customized_content,
-        originalContent: customizationResult.original,
-      });
-      setModalOpen(false);
-      setCustomizationResult(null);
-    } catch (err) {
-      console.error("Failed to save customization:", err);
+  async function handleDownload() {
+    const url = await getCustomizedResumeUrl(id);
+    if (url) {
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "resume-customized.tex";
+      a.click();
     }
-  };
+  }
 
-  const handleCancel = () => {
-    setModalOpen(false);
-    setCustomizationResult(null);
-  };
+  async function handleRemoveCustomized() {
+    await removeCustomizedResume(id);
+    setLocalCustomizedKey(null);
+  }
 
   return (
     <div className="rounded-lg border border-border bg-card p-4 space-y-3">
       {/* Header */}
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <h3 className="font-semibold text-sm truncate">{posting.title || "Untitled"}</h3>
+          <h3 className="font-semibold text-sm truncate">
+            {posting.title || "Untitled"}
+          </h3>
           <p className="text-xs text-muted">{company.name}</p>
         </div>
         <button
@@ -98,10 +102,15 @@ export function QueueJobCard({
           {/* Keywords */}
           {matchedKeywords.length > 0 && (
             <div>
-              <p className="text-xs font-medium mb-1">Matched ({matchedKeywords.length})</p>
+              <p className="text-xs font-medium mb-1">
+                Matched ({matchedKeywords.length})
+              </p>
               <div className="flex flex-wrap gap-1">
                 {matchedKeywords.slice(0, 3).map((kw) => (
-                  <span key={kw} className="inline-block rounded-full bg-green-100 px-2 py-1 text-xs font-medium">
+                  <span
+                    key={kw}
+                    className="inline-block rounded-full bg-green-100 px-2 py-1 text-xs font-medium"
+                  >
                     {kw}
                   </span>
                 ))}
@@ -116,10 +125,15 @@ export function QueueJobCard({
 
           {missingKeywords.length > 0 && (
             <div>
-              <p className="text-xs font-medium mb-1">Missing ({missingKeywords.length})</p>
+              <p className="text-xs font-medium mb-1">
+                Missing ({missingKeywords.length})
+              </p>
               <div className="flex flex-wrap gap-1">
                 {missingKeywords.slice(0, 3).map((kw) => (
-                  <span key={kw} className="inline-block rounded-full bg-border px-2 py-1 text-xs font-medium">
+                  <span
+                    key={kw}
+                    className="inline-block rounded-full bg-border px-2 py-1 text-xs font-medium"
+                  >
                     {kw}
                   </span>
                 ))}
@@ -136,16 +150,46 @@ export function QueueJobCard({
             <p className="text-xs text-muted">{fitExplanation}</p>
           )}
 
-          {/* Customize Resume Button */}
-          {missingKeywords.length > 0 && (
-            <button
-              onClick={handleCustomizeClick}
-              disabled={customizing}
-              className="w-full py-2 px-3 text-xs font-medium rounded bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {customizing ? "Customizing..." : "Customize Resume"}
-            </button>
-          )}
+          {/* Resume customization actions */}
+          <div className="flex flex-wrap items-center gap-2 border-t border-border pt-2">
+            {!localCustomizedKey ? (
+              <>
+                <button
+                  onClick={handleGenerate}
+                  disabled={generating || !hasLatexSource}
+                  title={
+                    !hasLatexSource
+                      ? "Upload your .tex resume in Settings to enable this"
+                      : undefined
+                  }
+                  className="inline-flex items-center gap-1.5 rounded border border-indigo-400 px-2.5 py-1 text-xs font-medium text-indigo-600 hover:bg-indigo-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-indigo-600 dark:text-indigo-400 dark:hover:bg-indigo-950"
+                >
+                  <FileText size={12} />
+                  {generating ? "Generating…" : "Generate resume"}
+                </button>
+                {generateError && (
+                  <span className="text-xs text-red-500">{generateError}</span>
+                )}
+              </>
+            ) : (
+              <>
+                <button
+                  onClick={handleDownload}
+                  className="inline-flex items-center gap-1.5 rounded border border-emerald-400 px-2.5 py-1 text-xs font-medium text-emerald-700 hover:bg-emerald-50 dark:border-emerald-600 dark:text-emerald-400 dark:hover:bg-emerald-950"
+                >
+                  <Download size={12} />
+                  Download .tex
+                </button>
+                <button
+                  onClick={handleRemoveCustomized}
+                  className="inline-flex items-center gap-1.5 rounded border border-border px-2.5 py-1 text-xs text-muted hover:bg-border-soft"
+                >
+                  <Trash2 size={12} />
+                  Remove
+                </button>
+              </>
+            )}
+          </div>
         </div>
       ) : (
         <button
@@ -167,20 +211,6 @@ export function QueueJobCard({
           View posting
         </a>
       </div>
-
-      {/* Customization Modal */}
-      {customizationResult && (
-        <ResumeCustomizationModal
-          open={modalOpen}
-          onOpenChange={setModalOpen}
-          original={customizationResult.original}
-          customized={customizationResult.customized_content}
-          insertedKeywords={customizationResult.insertedKeywords}
-          loading={false}
-          onAccept={handleAcceptCustomization}
-          onCancel={handleCancel}
-        />
-      )}
     </div>
   );
 }

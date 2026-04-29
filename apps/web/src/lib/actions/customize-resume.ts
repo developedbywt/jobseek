@@ -1,129 +1,252 @@
 "use server";
 
-import { getResume } from "@/lib/actions/resume";
+import { eq, and } from "drizzle-orm";
+import {
+  S3Client,
+  PutObjectCommand,
+  DeleteObjectCommand,
+} from "@aws-sdk/client-s3";
+import { db } from "@/db";
+import { jobQueue, userResume, jobPosting, company } from "@/db/schema";
 import { getSessionUserId } from "@/lib/sessionCache";
+import {
+  buildCustomizePrompt,
+  parseCustomizeResponse,
+} from "@/lib/resume/customize-prompt";
 
-type CustomizationResult = {
-  customized: boolean;
-  original: string;
-  customized_content?: string;
-  preview?: string;
-  error?: string;
-};
+export type { CustomizeChange, CustomizeResult } from "@/lib/resume/customize-prompt";
+export { buildCustomizePrompt, parseCustomizeResponse };
 
-async function callLlmForCustomization(
-  resumeContent: string,
-  missingKeywords: string[],
-  jobTitle: string,
-  model: "sonnet" | "gpt-4o",
-): Promise<string | null> {
-  const isAnthropic = model === "sonnet";
-  const endpoint = isAnthropic ? "https://api.anthropic.com/v1/messages" : "https://api.openai.com/v1/chat/completions";
-  const headers: Record<string, string> = isAnthropic
-    ? {
-        "x-api-key": process.env.ANTHROPIC_API_KEY || "",
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-      }
-    : {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY || ""}`,
-        "Content-Type": "application/json",
-      };
+// ── R2 client ────────────────────────────────────────────────────────
 
-  const systemPrompt = `You are a LaTeX resume expert. Your task is to intelligently integrate missing keywords into a resume while:
-1. PRESERVING all LaTeX formatting and structure
-2. MAINTAINING one-page limit (do not add content, only replace)
-3. PRIORITIZING the first \section{Experience} or equivalent
-4. Using SEMANTIC replacements (e.g., Java→Kotlin for JVM languages, Python→Go for systems)
-5. VALIDATING tech stack compatibility (Python ✗ Spring Boot is INVALID)
-6. KEEPING authentic and natural (no buzzwords, no obvious insertions)
+let _r2: S3Client | null = null;
 
-Return ONLY the modified LaTeX content. Do not explain or comment.`;
-
-  const userPrompt = `Resume:\n${resumeContent}\n\nJob Title: ${jobTitle}\nMissing Keywords: ${missingKeywords.join(", ")}\n\nIntegrate these keywords strategically into the resume.`;
-
-  try {
-    if (isAnthropic) {
-      const resp = await fetch(endpoint, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
-          max_tokens: 4000,
-          system: systemPrompt,
-          messages: [{ role: "user", content: userPrompt }],
-        }),
-      });
-
-      if (!resp.ok) return null;
-      const data = (await resp.json()) as {
-        content?: { type: string; text?: string }[];
-      };
-      return data.content?.[0]?.text ?? null;
-    } else {
-      const resp = await fetch(endpoint, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          model: "gpt-4o",
-          max_tokens: 4000,
-          system: systemPrompt,
-          messages: [{ role: "user", content: userPrompt }],
-        }),
-      });
-
-      if (!resp.ok) return null;
-      const data = (await resp.json()) as {
-        choices?: { message?: { content?: string } }[];
-      };
-      return data.choices?.[0]?.message?.content ?? null;
-    }
-  } catch {
-    return null;
+function getR2Client(): S3Client {
+  if (_r2) return _r2;
+  const endpoint = process.env.R2_ENDPOINT_URL;
+  const accessKeyId = process.env.R2_ACCESS_KEY_ID;
+  const secretAccessKey = process.env.R2_SECRET_ACCESS_KEY;
+  if (!endpoint || !accessKeyId || !secretAccessKey) {
+    throw new Error("R2 credentials not configured");
   }
+  _r2 = new S3Client({
+    endpoint,
+    region: "auto",
+    credentials: { accessKeyId, secretAccessKey },
+  });
+  return _r2;
 }
 
-export async function customizeResume(params: {
-  jobTitle: string;
-  missingKeywords: string[];
-  originalContent?: string;
-}): Promise<CustomizationResult> {
+function getR2Bucket(): string {
+  const bucket = process.env.R2_BUCKET;
+  if (!bucket) throw new Error("R2_BUCKET not set");
+  return bucket;
+}
+
+// ── LLM call (Anthropic primary, GPT-4o fallback) ──────────────────
+
+async function callLlm(system: string, user: string): Promise<string> {
+  const anthropicKey = process.env.ANTHROPIC_API_KEY;
+  if (anthropicKey) {
+    try {
+      const resp = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "x-api-key": anthropicKey,
+          "anthropic-version": "2023-06-01",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-6",
+          max_tokens: 4096,
+          system,
+          messages: [{ role: "user", content: user }],
+        }),
+      });
+
+      if (resp.ok) {
+        const data = (await resp.json()) as {
+          content?: { type: string; text: string }[];
+        };
+        const text = data.content?.find((b) => b.type === "text")?.text ?? "";
+        if (text) return text;
+      }
+    } catch {
+      // fall through to GPT-4o
+    }
+  }
+
+  const openaiKey = process.env.OPENAI_API_KEY;
+  if (!openaiKey)
+    throw new Error(
+      "No LLM API key configured (ANTHROPIC_API_KEY or OPENAI_API_KEY)",
+    );
+
+  const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${openaiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "gpt-4o",
+      max_tokens: 4096,
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: user },
+      ],
+    }),
+  });
+
+  if (!resp.ok) throw new Error(`GPT-4o request failed: ${resp.status}`);
+
+  const data = (await resp.json()) as {
+    choices?: { message?: { content?: string } }[];
+  };
+  return data.choices?.[0]?.message?.content ?? "";
+}
+
+// ── Server actions ───────────────────────────────────────────────────
+
+export async function customizeResume(
+  jobQueueId: string,
+): Promise<{ success: boolean; error?: string }> {
   const userId = await getSessionUserId();
   if (!userId) throw new Error("Not authenticated");
 
-  const resume = await getResume();
-  if (!resume) throw new Error("Resume not found");
+  const [resume] = await db
+    .select({ latexSource: userResume.latexSource })
+    .from(userResume)
+    .where(eq(userResume.userId, userId))
+    .limit(1);
 
-  // Try Sonnet first
-  let customized = await callLlmForCustomization(
-    params.originalContent || resume.filename,
-    params.missingKeywords,
-    params.jobTitle,
-    "sonnet",
-  );
-
-  // Fallback to GPT-4o
-  if (!customized) {
-    customized = await callLlmForCustomization(
-      params.originalContent || resume.filename,
-      params.missingKeywords,
-      params.jobTitle,
-      "gpt-4o",
-    );
-  }
-
-  if (!customized) {
+  if (!resume?.latexSource) {
     return {
-      customized: false,
-      original: params.originalContent || resume.filename,
-      error: "Failed to customize resume with both models",
+      success: false,
+      error: "No LaTeX resume uploaded. Upload a .tex file in Settings.",
     };
   }
 
-  return {
-    customized: true,
-    original: params.originalContent || resume.filename,
-    customized_content: customized,
-    preview: `Customized resume with keywords: ${params.missingKeywords.slice(0, 3).join(", ")}${params.missingKeywords.length > 3 ? ` +${params.missingKeywords.length - 3} more` : ""}`,
-  };
+  const [item] = await db
+    .select({
+      postingId: jobQueue.postingId,
+      missingKeywords: jobQueue.missingKeywords,
+      matchedKeywords: jobQueue.matchedKeywords,
+      title: jobPosting.titles,
+      companyName: company.name,
+      descriptionR2Hash: jobPosting.descriptionR2Hash,
+    })
+    .from(jobQueue)
+    .innerJoin(jobPosting, eq(jobQueue.postingId, jobPosting.id))
+    .innerJoin(company, eq(jobPosting.companyId, company.id))
+    .where(and(eq(jobQueue.id, jobQueueId), eq(jobQueue.userId, userId)))
+    .limit(1);
+
+  if (!item) return { success: false, error: "Queue item not found." };
+
+  let jdText = "";
+  const r2Base = process.env.R2_PUBLIC_URL ?? "";
+  if (item.descriptionR2Hash && r2Base) {
+    try {
+      const r = await fetch(`${r2Base}/${item.descriptionR2Hash}.html`);
+      if (r.ok) {
+        const html = await r.text();
+        jdText = html
+          .replace(/<[^>]+>/g, " ")
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 6000);
+      }
+    } catch {
+      // proceed with empty jdText
+    }
+  }
+
+  const title = (item.title as string[] | null)?.[0] ?? "Unknown role";
+  const { system, user } = buildCustomizePrompt({
+    title,
+    company: item.companyName,
+    jdText,
+    missingKeywords: item.missingKeywords ?? [],
+    matchedKeywords: item.matchedKeywords ?? [],
+    latexSource: resume.latexSource,
+  });
+
+  let rawResponse: string;
+  try {
+    rawResponse = await callLlm(system, user);
+  } catch (err) {
+    return { success: false, error: String(err) };
+  }
+
+  const result = parseCustomizeResponse(rawResponse);
+  if (!result) {
+    return {
+      success: false,
+      error: "LLM returned an unexpected format. Please try again.",
+    };
+  }
+
+  const r2Key = `resumes/${userId}/${item.postingId}.tex`;
+  await getR2Client().send(
+    new PutObjectCommand({
+      Bucket: getR2Bucket(),
+      Key: r2Key,
+      Body: result.customized_latex,
+      ContentType: "text/x-tex",
+    }),
+  );
+
+  await db
+    .update(jobQueue)
+    .set({ customizedR2Key: r2Key, customizedAt: new Date() })
+    .where(eq(jobQueue.id, jobQueueId));
+
+  return { success: true };
+}
+
+export async function removeCustomizedResume(jobQueueId: string): Promise<void> {
+  const userId = await getSessionUserId();
+  if (!userId) throw new Error("Not authenticated");
+
+  const [item] = await db
+    .select({ customizedR2Key: jobQueue.customizedR2Key })
+    .from(jobQueue)
+    .where(and(eq(jobQueue.id, jobQueueId), eq(jobQueue.userId, userId)))
+    .limit(1);
+
+  if (!item?.customizedR2Key) return;
+
+  try {
+    await getR2Client().send(
+      new DeleteObjectCommand({
+        Bucket: getR2Bucket(),
+        Key: item.customizedR2Key,
+      }),
+    );
+  } catch {
+    // best-effort — clear DB reference regardless
+  }
+
+  await db
+    .update(jobQueue)
+    .set({ customizedR2Key: null, customizedAt: null })
+    .where(eq(jobQueue.id, jobQueueId));
+}
+
+export async function getCustomizedResumeUrl(
+  jobQueueId: string,
+): Promise<string | null> {
+  const userId = await getSessionUserId();
+  if (!userId) return null;
+
+  const [item] = await db
+    .select({ customizedR2Key: jobQueue.customizedR2Key })
+    .from(jobQueue)
+    .where(and(eq(jobQueue.id, jobQueueId), eq(jobQueue.userId, userId)))
+    .limit(1);
+
+  if (!item?.customizedR2Key) return null;
+
+  return `/api/resumes/${jobQueueId}`;
 }

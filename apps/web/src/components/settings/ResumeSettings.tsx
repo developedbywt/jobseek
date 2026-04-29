@@ -2,78 +2,83 @@
 
 import { useEffect, useState } from "react";
 import { getResume, uploadResume, deleteResume } from "@/lib/actions/resume";
+import type { ResumeInfo } from "@/lib/actions/resume";
 import { Button } from "@/components/ui/Button";
 import { Upload, Trash2 } from "lucide-react";
 
 export function ResumeSettings() {
-  const [filename, setFilename] = useState<string | null>(null);
-  const [keywordCount, setKeywordCount] = useState(0);
+  const [resume, setResume] = useState<ResumeInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    async function loadResume() {
-      try {
-        const resume = await getResume();
-        if (resume) {
-          setFilename(resume.filename);
-          setKeywordCount(resume.keywords.length);
-        }
-      } catch (err) {
-        console.error("Failed to load resume:", err);
-      } finally {
-        setLoading(false);
-      }
-    }
-
-    loadResume();
+    getResume()
+      .then((r) => setResume(r))
+      .catch((err) => console.error("Failed to load resume:", err))
+      .finally(() => setLoading(false));
   }, []);
 
   async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // Validate file type
-    if (!file.name.endsWith(".tex")) {
-      setError("Only .tex files are supported");
+    const isLatex = file.name.endsWith(".tex");
+    const isPdf = file.type.includes("pdf");
+    const isText = file.type.includes("text") || isLatex;
+
+    if (!isPdf && !isText) {
+      setError("Only PDF, plain text, or .tex files are supported.");
       return;
     }
 
-    setUploading(true);
     setError(null);
+    setUploading(true);
 
     try {
-      const content = await file.text();
-      const result = await uploadResume({
-        filename: file.name,
-        content,
-      });
+      let content = "";
+      let latexSource: string | undefined;
 
-      if (result.uploaded) {
-        setFilename(result.filename);
-        // Keywords will be extracted and updated after the server action
-        // For now, set a loading state
-        setKeywordCount(0);
+      if (isLatex) {
+        latexSource = await file.text();
+        content = latexSource;
+      } else if (isText) {
+        content = await file.text();
+      } else {
+        const buf = await file.arrayBuffer();
+        const bytes = new Uint8Array(buf);
+        const runs: string[] = [];
+        let run = "";
+        for (let i = 0; i < bytes.length; i++) {
+          const c = bytes[i];
+          if (c >= 32 && c < 127) {
+            run += String.fromCharCode(c);
+          } else {
+            if (run.length >= 4) runs.push(run);
+            run = "";
+          }
+        }
+        if (run.length >= 4) runs.push(run);
+        content = runs.join(" ");
       }
+
+      const result = await uploadResume({ filename: file.name, content, latexSource });
+      setResume(result);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to upload resume");
     } finally {
       setUploading(false);
-      // Reset input
       e.target.value = "";
     }
   }
 
   async function handleDelete() {
-    if (!filename) return;
-
+    if (!resume) return;
     if (!confirm("Are you sure you want to delete your resume?")) return;
 
     try {
       await deleteResume();
-      setFilename(null);
-      setKeywordCount(0);
+      setResume(null);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to delete resume");
@@ -89,7 +94,8 @@ export function ResumeSettings() {
       <div>
         <h3 className="font-semibold mb-2">Resume for Job Fit Analysis</h3>
         <p className="text-sm text-muted">
-          Upload your LaTeX resume to enable job fit analysis. We'll extract key skills and technologies from your resume.
+          Upload your resume to enable job fit analysis and AI-powered customization. Upload a{" "}
+          <code className="text-xs">.tex</code> file to unlock resume generation.
         </p>
       </div>
 
@@ -99,13 +105,18 @@ export function ResumeSettings() {
         </div>
       )}
 
-      {filename ? (
+      {resume ? (
         <div className="space-y-3 bg-border-soft rounded p-4">
           <div>
             <p className="text-sm font-medium">Uploaded resume</p>
-            <p className="text-sm text-muted">{filename}</p>
+            <p className="text-sm text-muted">{resume.filename}</p>
             <p className="text-xs text-muted mt-1">
-              {keywordCount > 0 ? `${keywordCount} keywords extracted` : "Keywords pending extraction"}
+              {resume.keywords.length > 0
+                ? `${resume.keywords.length} keywords extracted`
+                : "Keywords pending extraction"}
+              {resume.hasLatexSource && (
+                <span className="ml-2 text-indigo-600 dark:text-indigo-400">· LaTeX source stored</span>
+              )}
             </p>
           </div>
           <div className="flex gap-2">
@@ -119,7 +130,7 @@ export function ResumeSettings() {
               </button>
               <input
                 type="file"
-                accept=".tex"
+                accept=".pdf,.txt,.tex,text/plain,application/pdf,application/x-tex"
                 onChange={handleFileChange}
                 disabled={uploading}
                 className="hidden"
@@ -140,11 +151,11 @@ export function ResumeSettings() {
           <div className="border-2 border-dashed border-border rounded-lg p-6 text-center hover:border-primary transition-colors cursor-pointer">
             <Upload className="h-8 w-8 mx-auto mb-2 text-muted" />
             <p className="text-sm font-medium mb-1">Upload your resume</p>
-            <p className="text-xs text-muted">Drag and drop or click to select a .tex file</p>
+            <p className="text-xs text-muted">PDF, plain text, or <code>.tex</code> file</p>
           </div>
           <input
             type="file"
-            accept=".tex"
+            accept=".pdf,.txt,.tex,text/plain,application/pdf,application/x-tex"
             onChange={handleFileChange}
             disabled={uploading}
             className="hidden"
