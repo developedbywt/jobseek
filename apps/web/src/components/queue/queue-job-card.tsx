@@ -2,7 +2,7 @@
 
 import Image from "next/image";
 import { X } from "lucide-react";
-import { Trans } from "@lingui/react/macro";
+import { Trans, useLingui } from "@lingui/react/macro";
 import type { QueueEntry } from "@/lib/actions/queue";
 
 interface QueueJobCardProps {
@@ -33,6 +33,7 @@ const badgeColorMap = {
 };
 
 export function QueueJobCard({ item, onRemove }: QueueJobCardProps) {
+  const { t } = useLingui();
   const isAnalyzed = item.analyzedAt !== null;
   const tier = item.overlapScore != null ? scoreColor(item.overlapScore) : null;
 
@@ -71,7 +72,7 @@ export function QueueJobCard({ item, onRemove }: QueueJobCardProps) {
             <button
               onClick={() => onRemove(item.posting.id)}
               className="rounded p-1 text-muted hover:bg-border-soft hover:text-foreground"
-              aria-label="Remove from queue"
+              aria-label={t({ id: "queue.card.remove", comment: "Aria label for remove from queue button", message: "Remove from queue" })}
             >
               <X size={14} />
             </button>

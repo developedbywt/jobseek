@@ -11,15 +11,21 @@ export function QueuePage() {
   const [items, setItems] = useState<QueueEntry[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const { toggle } = useQueue();
   const { t } = useLingui();
 
   const loadData = useCallback(async () => {
-    const result = await getQueueItems({ offset: 0, limit: 50 });
-    setItems(result.items);
-    setTotal(result.total);
-  }, []);
+    try {
+      const result = await getQueueItems({ offset: 0, limit: 50 });
+      setItems(result.items);
+      setTotal(result.total);
+      setError(null);
+    } catch {
+      setError(t({ id: "queue.error.load", comment: "Error message when queue fails to load", message: "Failed to load your queue. Please refresh the page." }));
+    }
+  }, [t]);
 
   useEffect(() => {
     loadData().finally(() => setLoading(false));
@@ -43,10 +49,14 @@ export function QueuePage() {
     }
   }
 
-  function handleRemove(postingId: string) {
-    toggle(postingId);
+  async function handleRemove(postingId: string) {
     setItems((prev) => prev.filter((i) => i.posting.id !== postingId));
     setTotal((prev) => Math.max(0, prev - 1));
+    try {
+      await toggle(postingId);
+    } catch {
+      await loadData();
+    }
   }
 
   const analyzedItems = items.filter((i) => i.analyzedAt !== null);
@@ -56,6 +66,14 @@ export function QueuePage() {
     return (
       <div className="flex items-center justify-center py-24">
         <div className="h-8 w-8 animate-spin rounded-full border-4 border-muted border-t-primary" />
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="mx-auto max-w-2xl px-4 py-8">
+        <p className="text-sm text-red-600 dark:text-red-400">{error}</p>
       </div>
     );
   }
@@ -79,7 +97,8 @@ export function QueuePage() {
               : t({
                   id: "queue.page.analyzeAll",
                   comment: "Analyze all queued jobs button",
-                  message: `Analyze all (${pendingItems.length})`,
+                  message: "Analyze all ({count})",
+                  values: { count: pendingItems.length },
                 })}
           </button>
         )}
