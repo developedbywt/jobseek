@@ -1,14 +1,11 @@
 "use server";
 
 import { eq, and } from "drizzle-orm";
-import {
-  S3Client,
-  PutObjectCommand,
-  DeleteObjectCommand,
-} from "@aws-sdk/client-s3";
+import { PutObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { db } from "@/db";
 import { jobQueue, userResume, jobPosting, company } from "@/db/schema";
 import { getSessionUserId } from "@/lib/sessionCache";
+import { getR2Client, getR2Bucket } from "@/lib/r2";
 import {
   buildCustomizePrompt,
   parseCustomizeResponse,
@@ -16,32 +13,6 @@ import {
 
 export type { CustomizeChange, CustomizeResult } from "@/lib/resume/customize-prompt";
 export { buildCustomizePrompt, parseCustomizeResponse };
-
-// ── R2 client ────────────────────────────────────────────────────────
-
-let _r2: S3Client | null = null;
-
-function getR2Client(): S3Client {
-  if (_r2) return _r2;
-  const endpoint = process.env.R2_ENDPOINT_URL;
-  const accessKeyId = process.env.R2_ACCESS_KEY_ID;
-  const secretAccessKey = process.env.R2_SECRET_ACCESS_KEY;
-  if (!endpoint || !accessKeyId || !secretAccessKey) {
-    throw new Error("R2 credentials not configured");
-  }
-  _r2 = new S3Client({
-    endpoint,
-    region: "auto",
-    credentials: { accessKeyId, secretAccessKey },
-  });
-  return _r2;
-}
-
-function getR2Bucket(): string {
-  const bucket = process.env.R2_BUCKET;
-  if (!bucket) throw new Error("R2_BUCKET not set");
-  return bucket;
-}
 
 // ── LLM call (Anthropic primary, GPT-4o fallback) ──────────────────
 
@@ -110,7 +81,7 @@ async function callLlm(system: string, user: string): Promise<string> {
 
 export async function customizeResume(
   jobQueueId: string,
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; r2Key?: string; error?: string }> {
   const userId = await getSessionUserId();
   if (!userId) throw new Error("Not authenticated");
 
@@ -202,7 +173,7 @@ export async function customizeResume(
     .set({ customizedR2Key: r2Key, customizedAt: new Date() })
     .where(eq(jobQueue.id, jobQueueId));
 
-  return { success: true };
+  return { success: true, r2Key };
 }
 
 export async function removeCustomizedResume(jobQueueId: string): Promise<void> {

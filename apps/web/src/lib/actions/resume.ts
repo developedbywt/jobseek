@@ -1,6 +1,6 @@
 "use server";
 
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { userResume } from "@/db/schema";
 import { getSessionUserId } from "@/lib/sessionCache";
@@ -59,7 +59,12 @@ export async function getResume(): Promise<ResumeInfo | null> {
   if (!userId) return null;
 
   const [resume] = await db
-    .select()
+    .select({
+      filename: userResume.filename,
+      keywords: userResume.keywords,
+      updatedAt: userResume.updatedAt,
+      hasLatexSource: sql<boolean>`(${userResume.latexSource} is not null)`,
+    })
     .from(userResume)
     .where(eq(userResume.userId, userId))
     .limit(1);
@@ -70,7 +75,7 @@ export async function getResume(): Promise<ResumeInfo | null> {
     filename: resume.filename,
     keywords: resume.keywords,
     updatedAt: resume.updatedAt.toISOString(),
-    hasLatexSource: resume.latexSource !== null,
+    hasLatexSource: resume.hasLatexSource,
   };
 }
 

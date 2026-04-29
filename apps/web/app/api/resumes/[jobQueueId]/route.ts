@@ -1,23 +1,10 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { eq, and } from "drizzle-orm";
-import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
+import { GetObjectCommand } from "@aws-sdk/client-s3";
 import { db } from "@/db";
 import { jobQueue } from "@/db/schema";
 import { getSessionUserId } from "@/lib/sessionCache";
-
-function getR2Client(): S3Client {
-  const endpoint = process.env.R2_ENDPOINT_URL;
-  const accessKeyId = process.env.R2_ACCESS_KEY_ID;
-  const secretAccessKey = process.env.R2_SECRET_ACCESS_KEY;
-  if (!endpoint || !accessKeyId || !secretAccessKey) {
-    throw new Error("R2 credentials not configured");
-  }
-  return new S3Client({
-    endpoint,
-    region: "auto",
-    credentials: { accessKeyId, secretAccessKey },
-  });
-}
+import { getR2Client, getR2Bucket } from "@/lib/r2";
 
 export async function GET(
   _req: NextRequest,
@@ -47,18 +34,10 @@ export async function GET(
     );
   }
 
-  const bucket = process.env.R2_BUCKET;
-  if (!bucket) {
-    return NextResponse.json(
-      { error: "Storage not configured" },
-      { status: 500 },
-    );
-  }
-
   try {
     const r2 = getR2Client();
     const obj = await r2.send(
-      new GetObjectCommand({ Bucket: bucket, Key: item.customizedR2Key }),
+      new GetObjectCommand({ Bucket: getR2Bucket(), Key: item.customizedR2Key }),
     );
 
     const body = obj.Body;

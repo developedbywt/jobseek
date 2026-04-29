@@ -40,6 +40,7 @@ Matched keywords: [${params.matchedKeywords.join(", ")}]
 
 Job: ${params.title} at ${params.company}
 
+Job description:
 ${params.jdText}
 
 Resume LaTeX:

@@ -44,7 +44,7 @@ export function QueueJobCard({
     try {
       const result = await customizeResume(id);
       if (result.success) {
-        setLocalCustomizedKey(`resumes/${posting.id}.tex`);
+        setLocalCustomizedKey(result.r2Key ?? "customized");
       } else {
         setGenerateError(result.error ?? "Generation failed.");
       }
@@ -57,17 +57,25 @@ export function QueueJobCard({
 
   async function handleDownload() {
     const url = await getCustomizedResumeUrl(id);
-    if (url) {
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "resume-customized.tex";
-      a.click();
+    if (!url) {
+      setGenerateError("Could not retrieve download link. Please try again.");
+      return;
     }
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "resume-customized.tex";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
   }
 
   async function handleRemoveCustomized() {
-    await removeCustomizedResume(id);
-    setLocalCustomizedKey(null);
+    try {
+      await removeCustomizedResume(id);
+      setLocalCustomizedKey(null);
+    } catch {
+      setGenerateError("Failed to remove customized resume. Please try again.");
+    }
   }
 
   return (
