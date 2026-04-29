@@ -1,6 +1,6 @@
 "use server";
 
-import { eq, and, desc, count, sql } from "drizzle-orm";
+import { eq, and, desc, count, sql, isNull } from "drizzle-orm";
 import { db } from "@/db";
 import { jobQueue, jobPosting, company, userResume } from "@/db/schema";
 import { getSessionUserId } from "@/lib/sessionCache";
@@ -271,4 +271,153 @@ export async function analyzeQueueItem(
         eq(jobQueue.userId, userId),
       ),
     );
+}
+
+export async function getQueuedIds(): Promise<string[]> {
+  const userId = await getSessionUserId();
+  if (!userId) return [];
+
+  try {
+    const rows = await db
+      .select({ postingId: jobQueue.postingId })
+      .from(jobQueue)
+      .where(eq(jobQueue.userId, userId));
+    return rows.map((r) => r.postingId);
+  } catch {
+    return [];
+  }
+}
+
+type FitResult = {
+  overlap_score: number;
+  matched_keywords: string[];
+  missing_keywords: string[];
+  fit_explanation: string;
+};
+
+async function callMinimaxFitAnalysis(params: {
+  queueId: string;
+  title: string;
+  companyName: string;
+  jdText: string;
+  resumeKeywords: string[];
+}): Promise<void> {
+  const apiKey = process.env.MINIMAX_API_KEY;
+  if (!apiKey) return;
+
+  try {
+    const resp = await fetch("https://api.minimax.chat/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "abab6.5s-chat",
+        messages: [
+          {
+            role: "system",
+            content:
+              'You are a job fit analyzer. Given a candidate\'s keyword list and a job description, return JSON with exactly these fields:\n{\n  "overlap_score": number,\n  "matched_keywords": string[],\n  "missing_keywords": string[],\n  "fit_explanation": string\n}\noverlap_score is 0-100. matched_keywords are JD requirements present in resume keywords. missing_keywords are important JD requirements absent from resume. fit_explanation is 2-3 sentences covering skill match, seniority fit, notable gap. Return ONLY the JSON object.',
+          },
+          {
+            role: "user",
+            content: `Resume keywords: ${JSON.stringify(params.resumeKeywords)}\n\nJob: ${params.title} at ${params.companyName}\n\n${params.jdText}`,
+          },
+        ],
+        max_tokens: 400,
+        temperature: 0.2,
+      }),
+    });
+
+    if (!resp.ok) return;
+
+    const data = (await resp.json()) as {
+      choices?: { message?: { content?: string } }[];
+    };
+    const content = data.choices?.[0]?.message?.content?.trim() ?? "";
+    const match = content.match(/\{[\s\S]*\}/);
+    if (!match) return;
+
+    const result = JSON.parse(match[0]) as FitResult;
+
+    await db
+      .update(jobQueue)
+      .set({
+        overlapScore: result.overlap_score / 100,
+        matchedKeywords: result.matched_keywords,
+        missingKeywords: result.missing_keywords,
+        fitExplanation: result.fit_explanation,
+        analyzedAt: new Date(),
+      })
+      .where(eq(jobQueue.id, params.queueId));
+  } catch {
+    // Silently skip — job remains unanalyzed, user can retry
+  }
+}
+
+export async function analyzeQueue(): Promise<{ started: boolean }> {
+  const userId = await getSessionUserId();
+  if (!userId) throw new Error("Not authenticated");
+
+  const [resume] = await db
+    .select({ keywords: userResume.keywords })
+    .from(userResume)
+    .where(eq(userResume.userId, userId))
+    .limit(1);
+
+  if (!resume || resume.keywords.length === 0) {
+    return { started: false };
+  }
+
+  const unanalyzed = await db
+    .select({
+      id: jobQueue.id,
+      postingId: jobQueue.postingId,
+      title: sql<string | null>`${jobPosting.titles}[1]`,
+      companyName: company.name,
+    })
+    .from(jobQueue)
+    .innerJoin(jobPosting, eq(jobQueue.postingId, jobPosting.id))
+    .innerJoin(company, eq(jobPosting.companyId, company.id))
+    .where(and(eq(jobQueue.userId, userId), isNull(jobQueue.analyzedAt)));
+
+  if (unanalyzed.length === 0) return { started: false };
+
+  const r2Base = (process.env.R2_DOMAIN_URL ?? "").replace(/\/$/, "");
+
+  for (let i = 0; i < unanalyzed.length; i += 3) {
+    const batch = unanalyzed.slice(i, i + 3);
+    await Promise.all(
+      batch.map(async (item) => {
+        let jdText = "";
+        if (r2Base) {
+          try {
+            const url = `${r2Base}/job/${item.postingId}/en/latest.html`;
+            const r = await fetch(url);
+            if (r.ok) {
+              const html = await r.text();
+              jdText = html
+                .replace(/<[^>]+>/g, " ")
+                .replace(/\s+/g, " ")
+                .trim()
+                .slice(0, 4000);
+            }
+          } catch {
+            // proceed with empty JD text
+          }
+        }
+
+        await callMinimaxFitAnalysis({
+          queueId: item.id,
+          title: item.title ?? "Unknown role",
+          companyName: item.companyName,
+          jdText,
+          resumeKeywords: resume.keywords,
+        });
+      }),
+    );
+  }
+
+  return { started: true };
 }

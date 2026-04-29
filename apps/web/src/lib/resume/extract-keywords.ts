@@ -10,7 +10,7 @@ export async function extractKeywords(text: string): Promise<string[]> {
   if (!text.trim()) return [];
 
   const apiKey = process.env.MINIMAX_API_KEY;
-  if (!apiKey) return [];
+  if (!apiKey) return [...new Set(filtered)];
 
   try {
     // Tokenize by splitting on non-alphanumeric characters, but preserve hyphens and underscores
