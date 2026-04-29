@@ -12,6 +12,7 @@ import { getPostingDetail } from "@/lib/actions/search";
 import type { PostingDetail } from "@/lib/actions/search";
 import { getJobAiSummary } from "@/lib/actions/enrich-job";
 import { SaveButton } from "@/components/search/save-button";
+import { QueueButton } from "@/components/search/queue-button";
 import { useSavedJobs } from "@/components/SavedJobsProvider";
 import { PendingJobBanner } from "@/components/PendingJobWarning";
 import { sanitizeJobHtml } from "@/lib/sanitize";
@@ -204,6 +205,7 @@ function DetailContent({ detail, descriptionLoaded }: { detail: PostingDetail; d
         <div className="ml-auto flex shrink-0 items-center gap-2">
           <span suppressHydrationWarning className="text-[10px] tabular-nums text-muted">{timeAgoShort(detail.firstSeenAt)}</span>
           <SaveButton postingId={detail.id} />
+          <QueueButton postingId={detail.id} />
           <a
             href={withUtmSource(detail.sourceUrl)}
             target="_blank"

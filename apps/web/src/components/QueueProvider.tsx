@@ -19,7 +19,7 @@ type QueueContextValue = {
   isQueued: (postingId: string) => boolean;
   getQueueId: (postingId: string) => string | null;
   getAnalyzed: (postingId: string) => boolean;
-  toggle: (postingId: string) => void;
+  toggle: (postingId: string) => Promise<void>;
   isToggling: (postingId: string) => boolean;
 };
 
@@ -27,7 +27,7 @@ const QueueContext = createContext<QueueContextValue>({
   isQueued: () => false,
   getQueueId: () => null,
   getAnalyzed: () => false,
-  toggle: () => {},
+  toggle: () => Promise.resolve(),
   isToggling: () => false,
 });
 
@@ -82,8 +82,8 @@ export function QueueProvider({
     [togglingIds],
   );
 
-  const toggle = useCallback((postingId: string) => {
-    if (lockRef.current.has(postingId)) return;
+  const toggle = useCallback((postingId: string): Promise<void> => {
+    if (lockRef.current.has(postingId)) return Promise.resolve();
     lockRef.current.add(postingId);
 
     const prevInfo = infoMapRef.current.get(postingId);
@@ -98,7 +98,7 @@ export function QueueProvider({
     });
     setTogglingIds((prev) => new Set(prev).add(postingId));
 
-    (wasQueued && prevInfo
+    return (wasQueued && prevInfo
       ? removeFromQueue(prevInfo.queueId)
       : addToQueue(postingId)
     )
@@ -113,13 +113,14 @@ export function QueueProvider({
           return next;
         });
       })
-      .catch(() => {
+      .catch((err) => {
         setInfoMap((prev) => {
           const next = new Map(prev);
           if (wasQueued && prevInfo) next.set(postingId, prevInfo);
           else next.delete(postingId);
           return next;
         });
+        throw err;
       })
       .finally(() => {
         lockRef.current.delete(postingId);
