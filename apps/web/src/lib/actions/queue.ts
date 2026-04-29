@@ -273,6 +273,9 @@ export async function analyzeQueueItem(
     );
 }
 
+// Max queue IDs returned to avoid unbounded client payload
+const GET_QUEUED_IDS_LIMIT = 500;
+
 export async function getQueuedIds(): Promise<string[]> {
   const userId = await getSessionUserId();
   if (!userId) return [];
@@ -281,19 +284,13 @@ export async function getQueuedIds(): Promise<string[]> {
     const rows = await db
       .select({ postingId: jobQueue.postingId })
       .from(jobQueue)
-      .where(eq(jobQueue.userId, userId));
+      .where(eq(jobQueue.userId, userId))
+      .limit(GET_QUEUED_IDS_LIMIT);
     return rows.map((r) => r.postingId);
   } catch {
     return [];
   }
 }
-
-type FitResult = {
-  overlap_score: number;
-  matched_keywords: string[];
-  missing_keywords: string[];
-  fit_explanation: string;
-};
 
 async function callMinimaxFitAnalysis(params: {
   queueId: string;
@@ -302,12 +299,20 @@ async function callMinimaxFitAnalysis(params: {
   jdText: string;
   resumeKeywords: string[];
 }): Promise<void> {
+  type FitResult = {
+    overlap_score: number;
+    matched_keywords: string[];
+    missing_keywords: string[];
+    fit_explanation: string;
+  };
+
   const apiKey = process.env.MINIMAX_API_KEY;
   if (!apiKey) return;
 
   try {
     const resp = await fetch("https://api.minimax.chat/v1/chat/completions", {
       method: "POST",
+      signal: AbortSignal.timeout(20000),
       headers: {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
@@ -341,6 +346,10 @@ async function callMinimaxFitAnalysis(params: {
 
     const result = JSON.parse(match[0]) as FitResult;
 
+    if (typeof result.overlap_score !== "number" || !isFinite(result.overlap_score)) {
+      return;
+    }
+
     await db
       .update(jobQueue)
       .set({
@@ -356,68 +365,79 @@ async function callMinimaxFitAnalysis(params: {
   }
 }
 
+// In-memory guard prevents duplicate concurrent analyzeQueue calls per user
+// within the same server instance (protects against double-click / parallel tabs).
+const analyzingUsers = new Set<string>();
+
 export async function analyzeQueue(): Promise<{ started: boolean }> {
   const userId = await getSessionUserId();
   if (!userId) throw new Error("Not authenticated");
 
-  const [resume] = await db
-    .select({ keywords: userResume.keywords })
-    .from(userResume)
-    .where(eq(userResume.userId, userId))
-    .limit(1);
+  if (analyzingUsers.has(userId)) return { started: false };
 
-  if (!resume || resume.keywords.length === 0) {
-    return { started: false };
-  }
+  analyzingUsers.add(userId);
+  try {
+    const [resume] = await db
+      .select({ keywords: userResume.keywords })
+      .from(userResume)
+      .where(eq(userResume.userId, userId))
+      .limit(1);
 
-  const unanalyzed = await db
-    .select({
-      id: jobQueue.id,
-      postingId: jobQueue.postingId,
-      title: sql<string | null>`${jobPosting.titles}[1]`,
-      companyName: company.name,
-    })
-    .from(jobQueue)
-    .innerJoin(jobPosting, eq(jobQueue.postingId, jobPosting.id))
-    .innerJoin(company, eq(jobPosting.companyId, company.id))
-    .where(and(eq(jobQueue.userId, userId), isNull(jobQueue.analyzedAt)));
+    if (!resume || resume.keywords.length === 0) {
+      return { started: false };
+    }
 
-  if (unanalyzed.length === 0) return { started: false };
+    const unanalyzed = await db
+      .select({
+        id: jobQueue.id,
+        postingId: jobQueue.postingId,
+        title: sql<string | null>`${jobPosting.titles}[1]`,
+        companyName: company.name,
+      })
+      .from(jobQueue)
+      .innerJoin(jobPosting, eq(jobQueue.postingId, jobPosting.id))
+      .innerJoin(company, eq(jobPosting.companyId, company.id))
+      .where(and(eq(jobQueue.userId, userId), isNull(jobQueue.analyzedAt)));
 
-  const r2Base = (process.env.R2_DOMAIN_URL ?? "").replace(/\/$/, "");
+    if (unanalyzed.length === 0) return { started: false };
 
-  for (let i = 0; i < unanalyzed.length; i += 3) {
-    const batch = unanalyzed.slice(i, i + 3);
-    await Promise.all(
-      batch.map(async (item) => {
-        let jdText = "";
-        if (r2Base) {
-          try {
-            const url = `${r2Base}/job/${item.postingId}/en/latest.html`;
-            const r = await fetch(url);
-            if (r.ok) {
-              const html = await r.text();
-              jdText = html
-                .replace(/<[^>]+>/g, " ")
-                .replace(/\s+/g, " ")
-                .trim()
-                .slice(0, 4000);
+    const r2Base = (process.env.R2_DOMAIN_URL ?? "").replace(/\/$/, "");
+
+    for (let i = 0; i < unanalyzed.length; i += 3) {
+      const batch = unanalyzed.slice(i, i + 3);
+      await Promise.all(
+        batch.map(async (item) => {
+          let jdText = "";
+          if (r2Base) {
+            try {
+              const url = `${r2Base}/job/${item.postingId}/en/latest.html`;
+              const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
+              if (r.ok) {
+                const html = await r.text();
+                jdText = html
+                  .replace(/<[^>]+>/g, " ")
+                  .replace(/\s+/g, " ")
+                  .trim()
+                  .slice(0, 4000);
+              }
+            } catch {
+              // proceed with empty JD text
             }
-          } catch {
-            // proceed with empty JD text
           }
-        }
 
-        await callMinimaxFitAnalysis({
-          queueId: item.id,
-          title: item.title ?? "Unknown role",
-          companyName: item.companyName,
-          jdText,
-          resumeKeywords: resume.keywords,
-        });
-      }),
-    );
+          await callMinimaxFitAnalysis({
+            queueId: item.id,
+            title: item.title ?? "Unknown role",
+            companyName: item.companyName,
+            jdText,
+            resumeKeywords: resume.keywords,
+          });
+        }),
+      );
+    }
+
+    return { started: true };
+  } finally {
+    analyzingUsers.delete(userId);
   }
-
-  return { started: true };
 }

@@ -9,23 +9,21 @@ export function filterStopWords(tokens: string[]): string[] {
 export async function extractKeywords(text: string): Promise<string[]> {
   if (!text.trim()) return [];
 
+  const tokens = text
+    .split(/[\s\-_.,;:()[\]{}!?"']+/)
+    .filter((t) => t.length > 0);
+  const filtered = filterStopWords(tokens);
+
   const apiKey = process.env.MINIMAX_API_KEY;
   if (!apiKey) return [...new Set(filtered)];
 
+  if (filtered.length === 0) return [];
+
   try {
-    // Tokenize by splitting on non-alphanumeric characters, but preserve hyphens and underscores
-    const tokens = text
-      .split(/[\s\-_.,;:()[\]{}!?"']+/)
-      .filter((t) => t.length > 0);
-
-    // Filter stop words
-    const filtered = filterStopWords(tokens);
-
-    if (filtered.length === 0) return [];
-
     // Call MiniMax to normalize abbreviations and deduplicate
     const resp = await fetch("https://api.minimax.chat/v1/chat/completions", {
       method: "POST",
+      signal: AbortSignal.timeout(15000),
       headers: {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
@@ -81,11 +79,6 @@ Example output: ["JavaScript", "React", "TypeScript"]`,
 
     return filtered;
   } catch {
-    // Return filtered tokens if API call fails
-    return filterStopWords(
-      text
-        .split(/[\s\-_.,;:()[\]{}!?"']+/)
-        .filter((t) => t.length > 0)
-    );
+    return filtered;
   }
 }
