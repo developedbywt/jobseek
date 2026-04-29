@@ -12,7 +12,6 @@ concurrency:
 env:
   BUDGET_PER_3H: 10
   MAX_REVIEW_ROUNDS: 2
-  CODEX_MODEL: o4-mini
   REVIEWER: Milky-Mac
 
 permissions:
@@ -27,13 +26,12 @@ jobs:
     steps:
       - name: Check required secrets
         run: |
-          if [ -z "$OPENAI_KEY" ] && [ -z "$CLAUDE_TOKEN" ]; then
-            echo "::error::Neither OPENAI_API_KEY nor CLAUDE_ACCESS_TOKEN is set — skipping."
+          if [ -z "$CLAUDE_OAUTH_TOKEN" ]; then
+            echo "::error::CLAUDE_CODE_OAUTH_TOKEN is not set — skipping."
             exit 1
           fi
         env:
-          OPENAI_KEY: ${{ secrets.OPENAI_API_KEY }}
-          CLAUDE_TOKEN: ${{ secrets.CLAUDE_ACCESS_TOKEN }}
+          CLAUDE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -62,11 +60,11 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Install agents
+      - name: Install Claude Code
         if: >
           steps.select.outputs.selected != '' &&
           steps.budget.outputs.remaining > 0
-        run: npm install -g @anthropic-ai/claude-code @openai/codex
+        run: npm install -g @anthropic-ai/claude-code
 
       - name: Build implementation context
         id: context
@@ -94,36 +92,30 @@ jobs:
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
           echo "issue_title=$ISSUE_TITLE" >> "$GITHUB_OUTPUT"
 
-          # Write task context to files (avoids GITHUB_ENV size limits)
           echo "$ISSUE_BODY" > /tmp/task_body.md
           echo "$PARENT_BODY" > /tmp/parent_spec.md
         env:
           GH_TOKEN: ${{ github.token }}
 
-      # --- Codex path: implement → review → fix loop → PR → notify ---
-      - name: Implement, review and ship (Codex)
-        id: codex_pipeline
+      - name: Implement, review and ship (Claude Code)
+        id: claude_pipeline
         if: >
           steps.select.outputs.selected != '' &&
-          steps.budget.outputs.remaining > 0 &&
-          env.OPENAI_API_KEY != ''
-        continue-on-error: true
+          steps.budget.outputs.remaining > 0
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           GH_TOKEN: ${{ github.token }}
           ISSUE_NUM: ${{ steps.select.outputs.selected }}
           BRANCH: ${{ steps.context.outputs.branch }}
           ISSUE_TITLE: ${{ steps.context.outputs.issue_title }}
-          CODEX_MODEL: ${{ env.CODEX_MODEL }}
           MAX_REVIEW_ROUNDS: ${{ env.MAX_REVIEW_ROUNDS }}
           REVIEWER: ${{ env.REVIEWER }}
         run: |
           set -e
 
-          git config user.email "actions@github.com"
-          git config user.name "GitHub Actions"
+          git config user.email "claude[bot]@users.noreply.github.com"
+          git config user.name "claude[bot]"
 
-          # Retry helper — for transient errors (network, rate limit) only
           retry() {
             local max=$1; shift
             local attempt=0
@@ -163,14 +155,14 @@ jobs:
             git checkout "$BRANCH"
           else
             echo "=== Step 1: Implement ==="
-            retry 3 codex exec --full-auto -m "$CODEX_MODEL" "$IMPLEMENT_PROMPT"
+            retry 3 claude -p "$IMPLEMENT_PROMPT" --dangerously-skip-permissions
             git checkout "$BRANCH" 2>/dev/null || true
           fi
 
-          # ── PR-exists check — skip creation if already open ───────────────
+          # ── PR-exists check ───────────────────────────────────────────────
           EXISTING_PR=$(gh pr list --head "$BRANCH" --json number --jq '.[0].number // empty' 2>/dev/null || true)
           if [ -n "$EXISTING_PR" ]; then
-            echo "=== PR #$EXISTING_PR already exists — notifying reviewer and exiting ==="
+            echo "=== PR #$EXISTING_PR already exists — notifying reviewer ==="
             gh pr edit "$EXISTING_PR" --add-reviewer "$REVIEWER" 2>/dev/null || true
             gh pr comment "$EXISTING_PR" --body "👋 @$REVIEWER — resumed after a previous run. PR is ready for your review."
             exit 0
@@ -185,13 +177,16 @@ jobs:
 
             git diff origin/main..."$BRANCH" | head -c 100000 > /tmp/pr.diff
 
+            REVIEW_PROMPT="Review the following git diff for the jobseek project. Check for correctness, security, edge cases, and code style.
+
+            $(cat /tmp/pr.diff)
+
+            End your response with exactly one of these two lines (no other text after it):
+            VERDICT:PASS
+            VERDICT:FAIL"
+
             rm -f /tmp/review.md
-            retry 3 codex exec review \
-              --full-auto \
-              -m "$CODEX_MODEL" \
-              --base "origin/main" \
-              -o /tmp/review.md \
-              "Review for correctness, security, edge cases, and code style. End with VERDICT:PASS or VERDICT:FAIL on the last line."
+            retry 3 claude -p "$REVIEW_PROMPT" --dangerously-skip-permissions > /tmp/review.md
             git checkout -- . 2>/dev/null || true
 
             VERDICT=$(grep -oP 'VERDICT:\K(PASS|FAIL)' /tmp/review.md | tail -1 || echo "FAIL")
@@ -209,7 +204,7 @@ jobs:
               Fix all of them. Commit the fixes and push: git push origin $BRANCH.
               Do not open a PR."
 
-              retry 3 codex exec --full-auto -m "$CODEX_MODEL" "$FIX_PROMPT"
+              retry 3 claude -p "$FIX_PROMPT" --dangerously-skip-permissions
               git checkout "$BRANCH" 2>/dev/null || true
             fi
           done
@@ -222,9 +217,9 @@ jobs:
             --body "Closes #$ISSUE_NUM
 
           ---
-          🤖 Implemented and reviewed autonomously.
+          🤖 Implemented and reviewed autonomously by Claude Code.
 
-          **Codex review summary:**
+          **Review summary:**
           $REVIEW_BODY" \
             --head "$BRANCH" \
             --base main)
@@ -236,36 +231,7 @@ jobs:
           gh issue edit "$ISSUE_NUM" --repo "${{ github.repository }}" \
             --remove-label "in-progress" --add-label "awaiting-review" 2>/dev/null || true
           gh pr edit "$PR_NUMBER" --add-reviewer "$REVIEWER" 2>/dev/null || true
-          gh pr comment "$PR_NUMBER" --body "👋 @$REVIEWER — implementation is done and passed Codex review (${ROUND} round(s)). Ready for your final review."
-
-      # --- Claude fallback: implement + PR directly (no review loop) ---
-      - name: Implement (Claude Code fallback)
-        if: >
-          steps.select.outputs.selected != '' &&
-          steps.budget.outputs.remaining > 0 &&
-          steps.codex_pipeline.outcome != 'success'
-        uses: grll/claude-code-action@beta
-        with:
-          direct_prompt: |
-            You are implementing a feature task for the jobseek project.
-
-            ## Parent Feature Spec
-            ${{ hashFiles('/tmp/parent_spec.md') != '' && '(see /tmp/parent_spec.md)' || '(no parent issue found)' }}
-
-            ## Task
-            Issue #${{ steps.select.outputs.selected }}: ${{ steps.context.outputs.issue_title }}
-
-            ## Instructions
-            1. Create branch: git checkout -b ${{ steps.context.outputs.branch }}
-            2. Implement the task. Follow existing code conventions.
-            3. Write or update tests if the task involves logic changes.
-            4. Open a PR titled "${{ steps.context.outputs.issue_title }}" with body: Closes #${{ steps.select.outputs.selected }}
-            5. Assign @${{ env.REVIEWER }} as reviewer and comment: "👋 @${{ env.REVIEWER }} — ready for your review."
-          use_oauth: "true"
-          claude_access_token: ${{ secrets.CLAUDE_ACCESS_TOKEN }}
-          claude_refresh_token: ${{ secrets.CLAUDE_REFRESH_TOKEN }}
-          claude_expires_at: ${{ secrets.CLAUDE_EXPIRES_AT }}
-          secrets_admin_pat: ${{ secrets.SECRETS_ADMIN_PAT }}
+          gh pr comment "$PR_NUMBER" --body "👋 @$REVIEWER — implementation is done and passed Claude Code review (${ROUND} round(s)). Ready for your final review."
 
       - name: Reset label on failure
         if: >
