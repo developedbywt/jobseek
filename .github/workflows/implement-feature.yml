@@ -10,7 +10,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  BUDGET_PER_3H: 3
+  BUDGET_PER_3H: 10
   MAX_REVIEW_ROUNDS: 2
   CODEX_MODEL: gpt-5.5-2026-04-23
   REVIEWER: Milky-Mac
