@@ -12,7 +12,7 @@ concurrency:
 env:
   BUDGET_PER_3H: 10
   MAX_REVIEW_ROUNDS: 2
-  CODEX_MODEL: gpt-5.5-2026-04-23
+  CODEX_MODEL: o4-mini
   REVIEWER: Milky-Mac
 
 permissions:
