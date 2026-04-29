@@ -133,9 +133,6 @@ test.describe('Resume Customization Flow', () => {
       // Click should trigger loading state
       await customizeButton.click();
       
-      // Wait for modal
-      const modal = page.locator('text=Customize Resume Preview');
-      
       // Check if loading indicator appears or button shows loading state
       const loadingText = page.locator('text=/Customizing|Saving/').first();
       const loadingVisible = await loadingText.isVisible({ timeout: 1000 }).catch(() => false);

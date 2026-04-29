@@ -1,0 +1,26 @@
+-- Add resume_customization_history table to track customizations
+CREATE TABLE resume_customization_history (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id TEXT NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+  queue_id UUID NOT NULL REFERENCES job_queue(id) ON DELETE CASCADE,
+  posting_id UUID NOT NULL REFERENCES job_posting(id) ON DELETE CASCADE,
+  
+  -- Content tracking
+  original_r2_key TEXT,
+  customized_r2_key TEXT,
+  inserted_keywords TEXT[] NOT NULL DEFAULT '{}',
+  
+  -- Metadata
+  job_title TEXT NOT NULL,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Index for fast lookups
+CREATE INDEX idx_customization_user ON resume_customization_history(user_id);
+CREATE INDEX idx_customization_queue ON resume_customization_history(queue_id);
+CREATE INDEX idx_customization_created ON resume_customization_history(created_at DESC);
+
+-- Add customized_at column to user_resume table
+ALTER TABLE user_resume ADD COLUMN IF NOT EXISTS customized_at TIMESTAMP WITH TIME ZONE;
+ALTER TABLE user_resume ADD COLUMN IF NOT EXISTS customization_count INTEGER NOT NULL DEFAULT 0;

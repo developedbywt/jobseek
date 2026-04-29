@@ -14,36 +14,7 @@ export function ResumeDiffPreview({
   const originalLines = useMemo(() => original.split("\n"), [original]);
   const customizedLines = useMemo(() => customized.split("\n"), [customized]);
 
-  // Simple diff: highlight lines that changed
-  const diff = useMemo(() => {
-    const changes: Array<{ type: "unchanged" | "added" | "removed"; line: string; lineNum: number }> = [];
-
-    // Find changed lines (simplified diff algorithm)
-    const maxLines = Math.max(originalLines.length, customizedLines.length);
-
-    for (let i = 0; i < maxLines; i++) {
-      const origLine = originalLines[i] || "";
-      const custLine = customizedLines[i] || "";
-
-      if (origLine === custLine) {
-        changes.push({ type: "unchanged", line: origLine, lineNum: i });
-      } else if (origLine && !custLine) {
-        changes.push({ type: "removed", line: origLine, lineNum: i });
-      } else if (custLine && !origLine) {
-        changes.push({ type: "added", line: custLine, lineNum: i });
-      } else {
-        changes.push({ type: "added", line: custLine, lineNum: i });
-      }
-    }
-
-    return changes;
-  }, [originalLines, customizedLines]);
-
   const highlightKeywords = (text: string): React.ReactNode[] => {
-    let lastIndex = 0;
-    const nodes: React.ReactNode[] = [];
-
-    // Sort keywords by length (longest first) to avoid partial matches
     const sorted = [...insertedKeywords].sort((a, b) => b.length - a.length);
 
     for (const keyword of sorted) {
