@@ -1,6 +1,6 @@
 "use client";
 
-import { Inbox, InboxIcon } from "lucide-react";
+import { Inbox } from "lucide-react";
 import { useLingui } from "@lingui/react/macro";
 import * as Tooltip from "@radix-ui/react-tooltip";
 import { useAuth } from "@/lib/useAuth";

@@ -1,8 +1,8 @@
 "use server";
 
-import { eq, and } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { db } from "@/db";
-import { jobQueue } from "@/db/schema";
+import { jobQueue, resumeCustomizationHistory, userResume } from "@/db/schema";
 import { getSessionUserId } from "@/lib/sessionCache";
 
 type SaveCustomizationParams = {
@@ -10,6 +10,8 @@ type SaveCustomizationParams = {
   postingId: string;
   customizedContent: string;
   originalContent: string;
+  insertedKeywords?: string[];
+  jobTitle?: string;
 };
 
 type SaveCustomizationResult = {
@@ -33,12 +35,40 @@ export async function saveCustomization(
       };
     }
 
-    // In production: save to R2 and update user_resume with customized_at
-    // For now: just validate and return success
-    // This would typically:
-    // 1. Upload customized.tex to R2
-    // 2. Create customization record in database
-    // 3. Update user_resume.customized_at timestamp
+    const [queueItem] = await db
+      .select({ id: jobQueue.id })
+      .from(jobQueue)
+      .where(
+        and(
+          eq(jobQueue.id, params.queueId),
+          eq(jobQueue.userId, userId),
+          eq(jobQueue.postingId, params.postingId),
+        ),
+      )
+      .limit(1);
+
+    if (!queueItem) {
+      return {
+        saved: false,
+        error: "Queue item not found",
+      };
+    }
+
+    await db.insert(resumeCustomizationHistory).values({
+      userId,
+      queueId: params.queueId,
+      postingId: params.postingId,
+      insertedKeywords: params.insertedKeywords ?? [],
+      jobTitle: params.jobTitle ?? "Untitled position",
+    });
+
+    await db
+      .update(userResume)
+      .set({
+        customizedAt: new Date(),
+        customizationCount: sql`${userResume.customizationCount} + 1`,
+      })
+      .where(eq(userResume.userId, userId));
 
     return {
       saved: true,
@@ -52,7 +82,7 @@ export async function saveCustomization(
   }
 }
 
-export async function getCustomizationHistory(params: {
+export async function getCustomizationHistory(_params: {
   limit?: number;
 }): Promise<
   Array<{

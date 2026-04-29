@@ -61,7 +61,11 @@ export async function GET(req: NextRequest) {
             descriptionHtml,
             companyName: job.companyName,
           });
-          summary ? processed++ : skipped++;
+          if (summary) {
+            processed++;
+          } else {
+            skipped++;
+          }
         } catch {
           failed++;
         }

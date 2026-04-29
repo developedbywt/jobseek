@@ -55,6 +55,8 @@ export function QueueJobCard({
         postingId: posting.id,
         customizedContent: customizationResult.customized_content,
         originalContent: customizationResult.original,
+        insertedKeywords: customizationResult.insertedKeywords,
+        jobTitle: posting.title || "Untitled position",
       });
       setModalOpen(false);
       setCustomizationResult(null);
